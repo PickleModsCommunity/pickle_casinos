@@ -11,39 +11,54 @@ function ProcessLuckyWheelRewards(source, casinoId, entityId, section, rewards)
     if not entity then return end
     local sectionCfg = Config.LuckyWheel.sections[LuckyWheelSections[section]]
     if not sectionCfg then print("^1ERROR: LUCKY WHEEL SECTION CONFIG UNDEFINED, ADD THIS SECTION IN CONFIG.LUCKYWHEEL.SECTIONS: ", LuckyWheelSections[section]) return end
+    local session = GetCasinoPlayerSession(source)
+    local identifier = GetIdentifier(source)
     local totalCost = 0
     for _, reward in ipairs(rewards) do
-        if reward.casinoCost and reward.casinoCost > 0 then
-            totalCost = totalCost + reward.casinoCost
-        end
+        totalCost = totalCost + math.max(0, reward.casinoCost or 0)
     end
-    local balance = casino.balance or 0
-    if IsCasinoOwned(casinoId) and totalCost > 0 then
-        if balance < totalCost then
+    local owned = IsCasinoOwned(casinoId)
+    if owned and totalCost > 0 then
+        if (casino.balance or 0) < totalCost then
             ShowNotification(source, _L("luckywheel_no_casino_balance"))
             return false
         end
-        casino.balance = balance - totalCost
-        MySQL.Async.execute('UPDATE `pickle_casinos` SET balance = ? WHERE id = ?', {
-            casino.balance,
-            casinoId
-        })
-        AddCasinoTransaction(source, casinoId, "luckywheel_withdraw", totalCost)
-        TriggerClientEvent("pickle_casinos:updateCasinoBalance", -1, casinoId, casino.balance, casino.marked_balance or 0)
+        -- Reserve the cost before vehicle inserts can yield to another spin.
+        casino.balance = casino.balance - totalCost
     end
+    local delivered, spent = {}, 0
     for _, reward in ipairs(rewards) do
-        if reward.type == "money" then
-            AddMoney(source, reward.amount)
-        elseif reward.type == "chips" then
-            AddCasinoChips(source, casinoId, reward.amount)
+        local sameSession = IsCasinoPlayerSession(source, session)
+        local granted = false
+        if reward.type == "chips" then
+            granted = RefundCasinoChips(source, casinoId, reward.amount, not sameSession, identifier)
         elseif reward.type == "item" then
-            Inventory.AddItem(source, reward.name, reward.amount)
-        elseif reward.type == "vehicle" then
-            AddOwnedVehicle(source, reward.model)
-        elseif reward.type == "xp" and Config.XPEnabled then
-            AddPlayerXP(source, reward.name, reward.amount)
+            granted = RefundCasinoItem(source, reward.name, reward.amount, not sameSession, identifier)
+        elseif sameSession then
+            if reward.type == "money" then
+                granted = AddMoney(source, reward.amount)
+            elseif reward.type == "vehicle" then
+                granted = AddOwnedVehicle(source, reward.model)
+            elseif reward.type == "xp" and Config.XPEnabled then
+                AddPlayerXP(source, reward.name, reward.amount)
+                granted = true
+            end
+        end
+        if granted then
+            delivered[#delivered + 1] = reward
+            spent = spent + math.max(0, reward.casinoCost or 0)
         end
     end
+    if owned and totalCost > 0 then
+        -- A failed vehicle insert does not charge the casino or announce a win.
+        casino.balance = casino.balance + totalCost - spent
+        MySQL.Async.execute('UPDATE `pickle_casinos` SET balance = ? WHERE id = ?', { casino.balance, casinoId })
+        TriggerClientEvent("pickle_casinos:updateCasinoBalance", -1, casinoId, casino.balance, casino.marked_balance or 0)
+        if spent > 0 then AddCasinoTransaction(source, casinoId, "luckywheel_withdraw", spent) end
+    end
+    if #delivered == 0 then return false end
+    if not IsCasinoPlayerSession(source, session) then return true end
+    rewards = delivered
     local prizeString = ""
     local firstPrize = rewards[1]
     if firstPrize.type == "money" then
@@ -122,11 +137,11 @@ local function CancelPendingSpin(casinoId, entity, dropped)
         casino.vip_players[pending.cooldownIndex].spinStart = pending.previousSpinStart
         UpdateCasinoPlayerInfo(casinoId)
     end
-    if pending.spinPrice > 0 then RefundCasinoChips(pending.source, casinoId, pending.spinPrice, dropped) end
-    if pending.usedTicket then RefundCasinoItem(pending.source, GetLuckyTicketItem(), 1, dropped) end
+    if pending.spinPrice > 0 then RefundCasinoChips(pending.source, casinoId, pending.spinPrice, dropped or not IsCasinoPlayerSession(pending.source, pending.session), pending.identifier) end
+    if pending.usedTicket then RefundCasinoItem(pending.source, GetLuckyTicketItem(), 1, dropped or not IsCasinoPlayerSession(pending.source, pending.session), pending.identifier) end
 end
 
-AddEventHandler("playerDropped", function()
+AddEventHandler("pickle_casinos:playerUnloaded", function(source)
     local casinoId, entity = FindPendingSpin(source)
     if entity and entity.stage and entity.stage.type == "starting" then
         CancelPendingSpin(casinoId, entity, true)
@@ -166,9 +181,9 @@ RegisterNetEvent("pickle_casinos:luckywheel:startSpin", function()
         end)
         -- The player left mid-spin: don't pay (or debit the casino); store a
         -- refund of what they paid instead, and give the cooldown back.
-        if not IsPlayerOnline(source) then
-            if spinPrice > 0 then RefundCasinoChips(source, casinoId, spinPrice, true) end
-            if pending.usedTicket then RefundCasinoItem(source, GetLuckyTicketItem(), 1, true) end
+        if not IsCasinoPlayerSession(source, pending.session) then
+            if spinPrice > 0 then RefundCasinoChips(source, casinoId, spinPrice, true, pending.identifier) end
+            if pending.usedTicket then RefundCasinoItem(source, GetLuckyTicketItem(), 1, true, pending.identifier) end
             if pending.cooldownIndex and casino.vip_players[pending.cooldownIndex] then
                 casino.vip_players[pending.cooldownIndex].spinStart = pending.previousSpinStart
                 UpdateCasinoPlayerInfo(casinoId)
@@ -187,10 +202,10 @@ RegisterNetEvent("pickle_casinos:luckywheel:startSpin", function()
             if not processed then
                 -- The casino couldn't cover the prize: refund the spin and the cooldown.
                 if spinPrice > 0 then
-                    RefundCasinoChips(source, casinoId, spinPrice)
+                    RefundCasinoChips(source, casinoId, spinPrice, not IsCasinoPlayerSession(source, pending.session), pending.identifier)
                 end
                 if pending.usedTicket then
-                    RefundCasinoItem(source, GetLuckyTicketItem(), 1)
+                    RefundCasinoItem(source, GetLuckyTicketItem(), 1, not IsCasinoPlayerSession(source, pending.session), pending.identifier)
                 end
                 if pending.cooldownIndex and casino.vip_players[pending.cooldownIndex] then
                     casino.vip_players[pending.cooldownIndex].spinStart = pending.previousSpinStart
@@ -254,7 +269,7 @@ RegisterCallback("pickle_casinos:luckywheel:requestSpin", function(source, cb, c
     end
     -- Start the cooldown when the spin is paid for, not when it finishes, so it
     -- can't be bypassed by overlapping requests.
-    local pending = { source = source, spinPrice = spinPrice, usedTicket = needsTicket }
+    local pending = { source = source, spinPrice = spinPrice, usedTicket = needsTicket, identifier = GetIdentifier(source), session = GetCasinoPlayerSession(source) }
     if needsCooldown then
         if not playerIndex then
             playerIndex = #casino.vip_players + 1

@@ -494,6 +494,7 @@ function GetPlayerBlackjackInfo(source)
 end
 
 RegisterCallback("pickle_casinos:blackjack:requestSeat", function(source, cb, casinoId, entityId, seatId)
+    PerformCooldownProcess(source)
     if not CanUseCasinoEntity(source, casinoId, entityId, "blackjack") then return cb(nil) end
     local seatId = JoinBlackjackEntity(source, casinoId, entityId, seatId)
     local entity = GetBlackjackEntity(casinoId, entityId)
@@ -510,6 +511,7 @@ RegisterCallback("pickle_casinos:blackjack:requestSeat", function(source, cb, ca
 end)
 
 RegisterNetEvent("pickle_casinos:blackjack:leaveTable", function()
+    PerformCooldownProcess(source)
     local source = source
     local info = GetPlayerBlackjackInfo(source)
     if not info then return end
@@ -576,7 +578,7 @@ RegisterNetEvent("pickle_casinos:blackjack:repeatWager", function()
     TriggerClientCasinoEvent("pickle_casinos:blackjack:updateSeatWager", -1, info.casinoId, info.entityId, info.seatId, 1, entity.seats[info.seatId].wagers[1])
 end)
 
-AddEventHandler('playerDropped', function()
+AddEventHandler("pickle_casinos:playerUnloaded", function(source)
     local source = source
     local info = GetPlayerBlackjackInfo(source)
     if not info then return end

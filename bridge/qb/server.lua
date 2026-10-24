@@ -106,8 +106,9 @@ end
 
 function AddMoney(source, count, currency)
     local xPlayer = QBCore.Functions.GetPlayer(tonumber(source))
-    if not xPlayer then return end
+    if not xPlayer then return false end
     local currency = currency or "money"
+    local before = GetMoney(source, currency)
     if (currency == "money") then
         local cashItem = GetCashItem()
         if cashItem then
@@ -118,7 +119,9 @@ function AddMoney(source, count, currency)
     elseif (currency == "dirty") then
         Inventory.AddItem(source, GetDirtyMoneyItem(), count)
     end
-    TriggerClientEvent("pickle_casinos:updateMoney", source, GetMoney(source, currency))
+    local after = GetMoney(source, currency)
+    TriggerClientEvent("pickle_casinos:updateMoney", source, after)
+    return after - before >= count
 end
 
 -- Removes money and returns true only if it was really taken.
@@ -175,26 +178,20 @@ end
 
 function AddOwnedVehicle(source, model)
     local xPlayer = QBCore.Functions.GetPlayer(tonumber(source))
-    local plate = ""
-    local letters = {"A", "B", "C", "D", "E", "F", "G", "H", "I", "J", "K", "L", "M", "N", "O", "P", "Q", "R", "S", "T", "U", "V", "W", "X", "Y", "Z"}
-    local numbers = {"0", "1", "2", "3", "4", "5", "6", "7", "8", "9"}
-    for i = 1, 3 do
-        plate = plate .. letters[math.random(1, #letters)]
-    end
-    plate = plate .. " "
-    for i = 1, 3 do
-        plate = plate .. numbers[math.random(1, #numbers)]
-    end
-    MySQL.Async.fetchAll('INSERT INTO player_vehicles (license, citizenid, vehicle, hash, plate, garage, state) VALUES (@license, @citizenid, @vehicle, @hash, @plate, @garage, @state)',
-    {
-        ['@license'] = xPlayer.PlayerData.license,
-        ['@citizenid'] = xPlayer.PlayerData.citizenid,
-        ['@vehicle'] = model,
-        ['@hash'] = joaat(model),
-        ['@plate'] = toupper(plate),
-        ['@garage'] = "pillboxgarage",
-        ['@state'] = 0
-    })
+    if not xPlayer then return false end
+    local license, identifier = xPlayer.PlayerData.license, xPlayer.PlayerData.citizenid
+    return InsertCasinoPrizeVehicle(function(plate)
+        local changed = MySQL.Sync.execute('INSERT IGNORE INTO player_vehicles (license, citizenid, vehicle, hash, plate, garage, state) VALUES (@license, @citizenid, @vehicle, @hash, @plate, @garage, @state)', {
+            ['@license'] = license,
+            ['@citizenid'] = identifier,
+            ['@vehicle'] = model,
+            ['@hash'] = joaat(model),
+            ['@plate'] = plate,
+            ['@garage'] = "pillboxgarage",
+            ['@state'] = 0,
+        })
+        return changed ~= nil and changed > 0
+    end)
 end
 
 function UpdateVehiclePlate(source, plate, newPlate)

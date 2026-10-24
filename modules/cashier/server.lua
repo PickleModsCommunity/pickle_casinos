@@ -4,6 +4,9 @@ function InitializeCashierEntity(casinoId, data)
 end
 
 RegisterCallback("pickle_casinos:getBalances", function(source, cb, casinoId, entityId)
+    PerformCooldownProcess(source)
+    RememberPlayerIdentifier(source)
+    PayPendingRefunds(source)
     local money = GetMoney(source)
     local dirty = GetMoney(source, "dirty")
     local balance = 0

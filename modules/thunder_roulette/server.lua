@@ -121,7 +121,7 @@ function ProcessThunderRouletteWager(casinoId, entityId, seat)
         ShowNotification(entity.seats[seat].source, _L("insufficient_chips_bet"))
         return false
     end
-    RegisterLuckyTicketWager(entity.seats[seat].source, "thunder_roulette", wager)
+    RegisterLuckyTicketWager(entity.seats[seat].source, "thunder_roulette", GetUnhedgedRouletteWager(entity.seats[seat].connects))
     return true
 end
 
@@ -359,6 +359,7 @@ RegisterCallback("pickle_casinos:repeatThunderRouletteWager", function(source, c
 end)
 
 RegisterCallback("pickle_casinos:thunder_roulette:requestSeat", function(source, cb, casinoId, entityId, seatId)
+    PerformCooldownProcess(source)
     if not CanUseCasinoEntity(source, casinoId, entityId, "thunder_roulette") then return cb(nil) end
     local seatId = JoinThunderRouletteEntity(source, casinoId, entityId, seatId)
     local entity = GetThunderRouletteEntity(casinoId, entityId)
@@ -376,6 +377,7 @@ RegisterCallback("pickle_casinos:thunder_roulette:requestSeat", function(source,
 end)
 
 RegisterNetEvent("pickle_casinos:thunder_roulette:leaveTable", function()
+    PerformCooldownProcess(source)
     local source = source
     local info = GetPlayerThunderRouletteInfo(source)
     if not info then return end
@@ -406,7 +408,7 @@ RegisterNetEvent("pickle_casinos:thunder_roulette:updateThunderRouletteWagers", 
 end)
 
 
-AddEventHandler('playerDropped', function()
+AddEventHandler("pickle_casinos:playerUnloaded", function(source)
     local source = source
     local info = GetPlayerThunderRouletteInfo(source)
     if not info then return end

@@ -149,7 +149,7 @@ function AskHireConsent(target, casinoLabel, managerName)
     return Citizen.Await(p)
 end
 
-AddEventHandler("playerDropped", function()
+AddEventHandler("pickle_casinos:playerUnloaded", function(source)
     PendingHireOffers[source] = nil
 end)
 
@@ -191,6 +191,7 @@ lib.callback.register("pickle_casinos:hirePlayer", function(source, casinoId, ta
 end)
 
 lib.callback.register("pickle_casinos:getNearbyPlayers", function(source)
+    PerformCooldownProcess(source)
     return safe(function(src)
         local srcPed = GetPlayerPed(src)
         if not srcPed then return {} end

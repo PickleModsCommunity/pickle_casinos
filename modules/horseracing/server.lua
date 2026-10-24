@@ -248,7 +248,7 @@ RegisterCallback("pickle_casinos:horseracing:getHorseRacingInfo", function(sourc
 end)
 
 
-AddEventHandler('playerDropped', function()
+AddEventHandler("pickle_casinos:playerUnloaded", function(source)
     local source = source
     for k,v in pairs(Tracks) do
         if v.players[source] then

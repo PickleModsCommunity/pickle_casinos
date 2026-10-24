@@ -98,3 +98,79 @@ function CreateSafeGameThread(label, fn, onError)
         end
     end)
 end
+
+-- Only server-side framework events reach this dispatcher. Do not register it
+-- as a network event: a client must never choose which player's state to clear.
+CasinoUnloadingIdentifiers = {}
+local CasinoSessions = {}
+
+function GetCasinoPlayerSession(source)
+    source = tonumber(source)
+    local identifier = GetIdentifier(source)
+    if not identifier then return nil end
+    local session = CasinoSessions[source]
+    if not session or session.identifier ~= identifier then
+        session = { identifier = identifier }
+        CasinoSessions[source] = session
+    end
+    return session
+end
+
+function IsCasinoPlayerSession(source, session)
+    return session ~= nil and CasinoSessions[tonumber(source)] == session
+        and IsPlayerOnline(source) and GetIdentifier(source) == session.identifier
+end
+
+function CleanupCasinoPlayer(playerSource, identifier)
+    local src = tonumber(playerSource)
+    if not src or src <= 0 or CasinoUnloadingIdentifiers[src] then return end
+    CasinoUnloadingIdentifiers[src] = identifier or GetKnownIdentifier(src)
+    CasinoSessions[src] = nil
+    TriggerEvent("pickle_casinos:playerUnloaded", src)
+    CasinoUnloadingIdentifiers[src] = nil
+end
+
+AddEventHandler("playerDropped", function()
+    CleanupCasinoPlayer(source)
+end)
+AddEventHandler("esx:playerLogout", function(playerSource)
+    CleanupCasinoPlayer(playerSource)
+end)
+AddEventHandler("QBCore:Server:OnPlayerUnload", function(playerSource)
+    CleanupCasinoPlayer(playerSource)
+end)
+
+-- Default roulette layouts use pairs 7/12 (low/high), 8/11 (even/odd),
+-- and 9/10 (red/black). Only their unmatched amounts earn tickets.
+function GetUnhedgedRouletteWager(connects)
+    local total = 0
+    for _, bet in ipairs(connects) do total = total + (bet.wager or 0) end
+    for _, pair in ipairs({ {7, 12}, {8, 11}, {9, 10} }) do
+        total = total - 2 * math.min(connects[pair[1]].wager or 0, connects[pair[2]].wager or 0)
+    end
+    return math.max(0, total)
+end
+
+-- Reserve before the database lookup so two concurrent casino prizes cannot
+-- choose the same plate while the first lookup/insert is waiting on SQL.
+local ReservedPrizePlates = {}
+function InsertCasinoPrizeVehicle(insertVehicle)
+    for _ = 1, 100 do
+        local plate = string.char(math.random(65, 90), math.random(65, 90), math.random(65, 90))
+            .. " " .. string.format("%03d", math.random(0, 999))
+        if not ReservedPrizePlates[plate] then
+            ReservedPrizePlates[plate] = true
+            local ok, result = pcall(function()
+                if GetOwnedVehicleFromPlate(plate) then return false end
+                return insertVehicle(plate)
+            end)
+            ReservedPrizePlates[plate] = nil
+            if ok and result then return true end
+            if not ok then
+                print("^1[pickle_casinos] vehicle prize insert failed: " .. tostring(result) .. "^0")
+                return false
+            end
+        end
+    end
+    return false
+end

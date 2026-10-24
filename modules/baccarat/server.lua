@@ -115,7 +115,7 @@ function StartBaccaratGame(casinoId, entityId)
                 transactions[entity.seats[i].source] = StartCasinoGameplayTransaction(entity.seats[i].source, casinoId, entityId, "baccarat", totalWager)
                 -- Ticket progress counts only once the stake is committed to a round
                 -- (bets can still be lowered and refunded while waiting).
-                RegisterLuckyTicketWager(entity.seats[i].source, "baccarat", totalWager)
+                RegisterLuckyTicketWager(entity.seats[i].source, "baccarat", totalWager - 2 * math.min(entity.seats[i].wagers.player or 0, entity.seats[i].wagers.banker or 0))
             end
         end
     end
@@ -402,6 +402,7 @@ function GetPlayerBaccaratInfo(source)
 end
 
 RegisterCallback("pickle_casinos:baccarat:requestSeat", function(source, cb, casinoId, entityId, seatId)
+    PerformCooldownProcess(source)
     if not CanUseCasinoEntity(source, casinoId, entityId, "baccarat") then return cb(nil) end
     local seatId = JoinBaccaratEntity(source, casinoId, entityId, seatId)
     local entity = GetBaccaratEntity(casinoId, entityId)
@@ -418,6 +419,7 @@ RegisterCallback("pickle_casinos:baccarat:requestSeat", function(source, cb, cas
 end)
 
 RegisterNetEvent("pickle_casinos:baccarat:leaveTable", function()
+    PerformCooldownProcess(source)
     local source = source
     local info = GetPlayerBaccaratInfo(source)
     if not info then return end
@@ -535,7 +537,7 @@ RegisterNetEvent("pickle_casinos:baccarat:repeatWager", function()
     TriggerClientCasinoEvent("pickle_casinos:baccarat:updateSeatWager", -1, info.casinoId, info.entityId, info.seatId, entity.seats[info.seatId].wagers)
 end)
 
-AddEventHandler('playerDropped', function()
+AddEventHandler("pickle_casinos:playerUnloaded", function(source)
     local source = source
     local info = GetPlayerBaccaratInfo(source)
     if info then

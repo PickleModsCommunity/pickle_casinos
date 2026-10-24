@@ -600,17 +600,21 @@ end
 function LeavePokerEntity(source, casinoId, entityId, seatId, dropped)
     local entity = GetCasinoEntity(casinoId, entityId)
     if not entity then return end
-    local source = entity.seats[seatId].source
-    if entity.seats[seatId].balance > 0 then
-        RefundCasinoChips(source, casinoId, entity.seats[seatId].balance, dropped)
-    end
-    if PokerTransactions[source] then
-        EndCasinoGameplayTransaction(PokerTransactions[source], source, casinoId, entityId, "poker", entity.seats[seatId].balance)
-        PokerTransactions[source] = nil
-    end
+    local seat = entity.seats[seatId]
+    if not seat or seat.source ~= source then return end
+    local transaction = PokerTransactions[source]
+    -- Detach escrow before refunds or transaction logging can yield. A second
+    -- leave/unload must not refund the same seat while SQL is still pending.
+    PokerTransactions[source] = nil
     entity.seats[seatId] = GenerateDefaultPokerSeat()
     CurrentPlayers[source] = nil
     TriggerClientCasinoEvent("pickle_casinos:poker:updateSeat", -1, casinoId, entityId, seatId, entity.seats[seatId])
+    if seat.balance > 0 then
+        RefundCasinoChips(source, casinoId, seat.balance, dropped)
+    end
+    if transaction then
+        EndCasinoGameplayTransaction(transaction, source, casinoId, entityId, "poker", seat.balance)
+    end
 end
 
 function StartPokerLobby(casinoId, entityId)
@@ -690,6 +694,7 @@ RegisterNetEvent("pickle_casinos:poker:sendPokerAction", function(betType, value
 end)
 
 RegisterNetEvent("pickle_casinos:poker:leaveTable", function()
+    PerformCooldownProcess(source)
     local source = source
     local playerInfo = GetPlayerPokerInfo(source)
     if not playerInfo then return end
@@ -705,7 +710,7 @@ RegisterNetEvent("pickle_casinos:poker:leaveTable", function()
     end
 end)
 
-AddEventHandler('playerDropped', function()
+AddEventHandler("pickle_casinos:playerUnloaded", function(source)
     local source = source
     local playerInfo = GetPlayerPokerInfo(source)
     if not playerInfo then return end

@@ -171,6 +171,7 @@ RegisterNetEvent("pickle_casinos:slots:redeemSpin", function(id, spinIndex)
 end)
 
 RegisterNetEvent("pickle_casinos:slots:leaveSlotMachine", function()
+    PerformCooldownProcess(source)
     local playerInfo = GetPlayerSlotInfo(source)
     if not playerInfo then return end
     local casinoId = playerInfo.casinoId
@@ -181,6 +182,7 @@ RegisterNetEvent("pickle_casinos:slots:leaveSlotMachine", function()
 end)
 
 RegisterCallback("pickle_casinos:slots:requestSeat", function(source, cb, casinoId, entityId)
+    PerformCooldownProcess(source)
     local canUse, casino, entity = CanUseCasinoEntity(source, casinoId, entityId, "slot")
     if not canUse then return cb(nil) end
     -- One machine per player.
@@ -237,7 +239,7 @@ RegisterCallback("pickle_casinos:slots:spinSlot", function(source, cb, betIndex)
 end)
 
 
-AddEventHandler('playerDropped', function()
+AddEventHandler("pickle_casinos:playerUnloaded", function(source)
     local source = source
     -- Unredeemed spins can't be paid to a disconnected player; don't keep them forever.
     for id, spin in pairs(PendingSpins) do

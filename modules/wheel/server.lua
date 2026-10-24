@@ -86,7 +86,7 @@ function StartWheelGame(casinoId, entityId)
         entity.roundPaid = true
         for k, v in pairs(entity.players) do
             local sectionBet = v.wagers[section] or 0
-            local online = IsPlayerOnline(k)
+            local online = IsCasinoPlayerSession(k, v.session)
             local money = online and GetCasinoChips(k, casinoId) or 0
             if sectionBet > 0 and online and transactions[k] then
                 local payout = 0
@@ -204,6 +204,7 @@ function GenerateDefaultWheelWagers()
 end
 
 RegisterNetEvent("pickle_casinos:wheel:leaveTable", function()
+    PerformCooldownProcess(source)
     local playerInfo = GetPlayerWheelInfo(source)
     if not playerInfo then return end
     local entity = GetCasinoEntity(playerInfo.casinoId, playerInfo.entityId)
@@ -217,7 +218,7 @@ RegisterNetEvent("pickle_casinos:wheel:leaveTable", function()
     end
 end)
 
-AddEventHandler("playerDropped", function()
+AddEventHandler("pickle_casinos:playerUnloaded", function(source)
     local src = source
     for _, casino in pairs(Casinos) do
         for i = 1, #casino.entities do
@@ -235,6 +236,7 @@ AddEventHandler("playerDropped", function()
 end)
 
 RegisterCallback("pickle_casinos:wheel:requestSeat", function(source, cb, casinoId, entityId, seatId)
+    PerformCooldownProcess(source)
     local canUse, casino, entity = CanUseCasinoEntity(source, casinoId, entityId, "wheel")
     if not canUse then return cb(nil) end
     local existing = GetPlayerWheelInfo(source)
@@ -242,9 +244,17 @@ RegisterCallback("pickle_casinos:wheel:requestSeat", function(source, cb, casino
         ShowNotification(source, _L("playing_other_game"))
         return cb(nil)
     end
+    local player = entity.players[source]
+    if player and not IsCasinoPlayerSession(source, player.session) then
+        -- Keep the old round isolated until it has finished; a new character
+        -- cannot reactivate the previous character's charged wagers.
+        if entity.stage.type ~= "waiting" then return cb(nil) end
+        entity.players[source] = nil
+    end
     if not entity.players[source] then
         entity.players[source] = {
             wagers = GenerateDefaultWheelWagers(),
+            session = GetCasinoPlayerSession(source),
         }
     end
     entity.players[source].left = nil

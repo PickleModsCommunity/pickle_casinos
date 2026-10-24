@@ -259,7 +259,7 @@ Use a headless harness that mocks `source`, the bridge (`GetMoney`, `AddMoney`, 
 
 ## Fix status (branch `security-audit-ticker-24102026`)
 
-These changes are syntax-checked only. They have **not** been run on a FiveM server yet, so test each game before merging.
+The follow-up includes automated security and framework regression tests (details below). These changes have **not** been run on a FiveM server yet, so test each game before merging.
 
 | # | Area | Status |
 |---|---|---|
@@ -279,3 +279,18 @@ These changes are syntax-checked only. They have **not** been run on a FiveM ser
 | 13 | Chip purchase without payment (network drop) | Done. Reported exploit: drop the connection (`ipconfig /release`), buy chips, move the cash to a stash, reconnect, and the chips arrive without the money being taken. Cause: the cashier never checked whether removing the money succeeded, and the success check relied on the framework's cached balance. Now money and items are removed through whatever really holds them. Cash is treated as an item only when it is one: with ox_inventory, when `money` is in the `inventory:accounts` convar (ox_inventory's default; on ESX, `black_money` is always an item). `Config.FrameworkSettings.cashItem` can force this: `false` means a framework account, or give an item name. Otherwise the framework's own cash balance is used, relying on its success result, with a before/after check when nothing is returned. Chips, store items and VIP are only granted if that removal succeeded. If the chips or items can't be added, the money is refunded. Each player's cashier, store, VIP and transfer actions now run one at a time. |
 
 New config keys: `Config.ExchangeRateLimits`, `Config.FrameworkSettings.cashItem` (default `"auto"`). New DB table (created automatically): `pickle_casino_pending_refunds`. New bridge function: `GetPlayerJobGrade` (ESX and QB; add it to a custom bridge if you use one). New locale keys: `invalid_amount`, `casino_entity_in_use`, `invalid_wager`, `employee_hire_offer_header`, `employee_hire_offer_content`, `employee_hire_accept`, `employee_hire_decline`, `employee_hire_waiting`, `pending_refund_paid`, `chip_item_invalid`, `chip_item_unverified`, `chip_item_not_found`, `chip_item_in_use`. If your server has other locale files, add these keys to them too.
+
+
+## Follow-up hardening: 2026-10-24
+
+- Ticket progress excludes matching Player/Banker baccarat stakes and matching low/high, odd/even, and red/black roulette stakes (including thunder roulette). Bets, payouts, and house accounting are unchanged.
+- ESX character logout, QB character unload, and disconnects share server-only cleanup. Character session checks protect delayed lucky-wheel rewards, ticket loads, and pending-refund database waits. Money-wheel players cannot reactivate an old character's charged wagers.
+- Join/leave handlers and nearby-player scans use the existing spam detector. Poker detaches its escrow before any refund or transaction logging can yield, preventing duplicate leave refunds.
+- Failed chip/item/ticket inventory grants are stored in pending refunds, including cash-item failures in personal casinos. Refunds retry on character initialization and cashier balance requests. Failed claims remain owed to the original character and retain the original item name.
+- Transaction feeds recheck current management access before delivery. Casino labels are limited to 64 UTF-8 characters and exclude control characters, on both creation and update.
+- Both vehicle bridges check existing plates, reserve in-flight plates, retry insert conflicts, and capture the original owner before SQL waits. The duplicate ESX vehicle function is removed. Failed vehicle rewards do not charge the casino or announce a successful award; partial reward bundles only charge delivered rewards.
+- Dirty-money exchange limits and defaults are unchanged.
+
+Validation: `lua tests/security_regression.lua` (50 checks) and `lua tests/bridge_regression.lua` (10 checks) pass under Lua 5.4 through Lupa. Server/test files also pass Lua 5.4 compilation with the QB bridge's pre-existing `?.` extension normalized only in the validation input. The bridge regression harness applies the same normalization for stock Lua. No production syntax was rewritten for this compatibility step.
+
+These tests use framework, inventory, and SQL stubs. A live FiveM server and real framework/database integrations remain to be tested before merging, especially inventory-full payouts, character switching during games, and vehicle awards on each supported framework.

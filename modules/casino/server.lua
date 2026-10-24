@@ -1,6 +1,16 @@
 CurrentPlayers = {}
 PlayerCooldowns = {}
 
+local function SanitizeCasinoLabel(value)
+    if type(value) ~= "string" then return "INVALID_LABEL" end
+    value = value:gsub("[%c]", "")
+    local length = utf8.len(value)
+    if not length then return "INVALID_LABEL" end
+    if length > 64 then value = value:sub(1, utf8.offset(value, 65) - 1) end
+    if value == "" or value == PERSONAL_CASINOS_LABEL then return "INVALID_LABEL" end
+    return value
+end
+
 function GetCasino(casinoId)
     return Casinos[casinoId]
 end
@@ -420,7 +430,13 @@ end
 ManagementViewers = ManagementViewers or {}
 
 local function GetManagementViewers(casinoId)
-    return ManagementViewers[casinoId] or {}
+    local viewers = ManagementViewers[casinoId] or {}
+    for src in pairs(viewers) do
+        if not IsPlayerOnline(src) or not CanManageCasino(src, casinoId) then
+            viewers[src] = nil
+        end
+    end
+    return viewers
 end
 
 function RegisterManagementViewer(source, casinoId)
@@ -443,7 +459,7 @@ function UnregisterManagementViewer(source, casinoId)
     end
 end
 
-AddEventHandler("playerDropped", function()
+AddEventHandler("pickle_casinos:playerUnloaded", function(source)
     UnregisterManagementViewer(source)
 end)
 
@@ -534,19 +550,28 @@ function GetCasinoChips(source, casinoId)
     return chips
 end
 
-function AddCasinoChips(source, casinoId, amount)
+local QueuePendingRefund
+
+function AddCasinoChips(source, casinoId, amount, skipPending)
     local casino = Casinos[casinoId]
-    if not casino then return end
+    if not casino then return false end
     -- Payouts like 2.5x or 0.95x can be fractional; pay whole chips instead of
     -- leaving the rounding to the inventory.
     amount = tonumber(amount)
-    if not amount or amount ~= amount or amount == math.huge then return end
+    if not amount or amount ~= amount or amount == math.huge then return false end
     amount = math.floor(amount)
-    if amount <= 0 then return end
-    if casino.settings.label == PERSONAL_CASINOS_LABEL then 
-        return AddMoney(source, amount)
+    if amount <= 0 then return false end
+    local personal = casino.settings.label == PERSONAL_CASINOS_LABEL
+    if IsPlayerOnline(source) then
+        local paid
+        if personal then paid = AddMoney(source, amount)
+        else paid = Inventory.AddItem(source, casino.settings.chipItem, amount) end
+        if paid ~= false then return true end
     end
-    Inventory.AddItem(source, casino.settings.chipItem, amount)
+    if not skipPending then
+        return QueuePendingRefund(source, casinoId, not personal and casino.settings.chipItem or nil, amount)
+    end
+    return false
 end
 
 -- Removes chips and returns true only if the full amount was actually taken.
@@ -604,7 +629,7 @@ function WithEconomyLock(source, fn)
     return true
 end
 
-AddEventHandler("playerDropped", function()
+AddEventHandler("pickle_casinos:playerUnloaded", function(source)
     EconomyLocks[source] = nil
 end)
 
@@ -614,22 +639,28 @@ local KnownIdentifiers = {}
 
 function RememberPlayerIdentifier(source)
     local identifier = GetIdentifier(source)
+    if identifier and KnownIdentifiers[source] and KnownIdentifiers[source] ~= identifier then
+        CleanupCasinoPlayer(source, KnownIdentifiers[source])
+    end
     if identifier then KnownIdentifiers[source] = identifier end
     return identifier
 end
 
 function GetKnownIdentifier(source)
-    return GetIdentifier(source) or KnownIdentifiers[source]
+    return CasinoUnloadingIdentifiers[source] or GetIdentifier(source) or KnownIdentifiers[source]
 end
 
-AddEventHandler("playerDropped", function()
+AddEventHandler("pickle_casinos:playerUnloaded", function(source)
     local src = source
     -- Other playerDropped handlers may still need it; forget it shortly after.
-    SetTimeout(10000, function() KnownIdentifiers[src] = nil end)
+    local identifier = KnownIdentifiers[src]
+    SetTimeout(10000, function()
+        if KnownIdentifiers[src] == identifier and not GetIdentifier(src) then KnownIdentifiers[src] = nil end
+    end)
 end)
 
-local function QueuePendingRefund(source, casinoId, item, amount)
-    local identifier = GetKnownIdentifier(source)
+QueuePendingRefund = function(source, casinoId, item, amount, identifier)
+    identifier = identifier or GetKnownIdentifier(source)
     if not identifier then
         print(("^1[pickle_casinos] Could not store a refund of %s for player %s: identifier unknown.^0"):format(tostring(amount), tostring(source)))
         return
@@ -637,52 +668,67 @@ local function QueuePendingRefund(source, casinoId, item, amount)
     MySQL.insert("INSERT INTO `pickle_casino_pending_refunds` (`identifier`, `casino_id`, `item`, `amount`) VALUES (?, ?, ?, ?)", {
         identifier, casinoId or 0, item, amount
     })
+    return true
 end
 
 -- Gives chips back now if the player is still connected, otherwise stores
 -- them and pays them out the next time the character loads. Pass `dropped`
 -- from playerDropped handlers, where the player may still look online.
-function RefundCasinoChips(source, casinoId, amount, dropped)
+function RefundCasinoChips(source, casinoId, amount, dropped, identifier)
     amount = math.floor(tonumber(amount) or 0)
     if amount <= 0 or not Casinos[casinoId] then return end
     if not dropped and IsPlayerOnline(source) then
         return AddCasinoChips(source, casinoId, amount)
     end
-    QueuePendingRefund(source, casinoId, nil, amount)
+    return QueuePendingRefund(source, casinoId, Casinos[casinoId].settings.label ~= PERSONAL_CASINOS_LABEL and Casinos[casinoId].settings.chipItem or nil, amount, identifier)
 end
 
 -- Same as RefundCasinoChips, for a plain inventory item (e.g. a lucky ticket).
-function RefundCasinoItem(source, item, amount, dropped)
+function RefundCasinoItem(source, item, amount, dropped, identifier)
     amount = math.floor(tonumber(amount) or 0)
     if amount <= 0 or type(item) ~= "string" then return end
-    if not dropped and IsPlayerOnline(source) then
-        return Inventory.AddItem(source, item, amount)
+    if not dropped and IsPlayerOnline(source) and Inventory.AddItem(source, item, amount) ~= false then
+        return true
     end
-    QueuePendingRefund(source, 0, item, amount)
+    return QueuePendingRefund(source, 0, item, amount, identifier)
 end
 
--- Pays out refunds stored while the player was offline. Each row is deleted
--- before it is paid, so a row can only ever be paid once.
+-- Delete claims each row once; a failed inventory grant is stored again for retry.
+local RefundPayouts = {}
 function PayPendingRefunds(source)
     local identifier = GetIdentifier(source)
-    if not identifier then return end
-    local rows = MySQL.query.await("SELECT `id`, `casino_id`, `item`, `amount` FROM `pickle_casino_pending_refunds` WHERE `identifier` = ?", { identifier }) or {}
-    for _, row in ipairs(rows) do
-        local amount = math.floor(tonumber(row.amount) or 0)
-        local casinoId = tonumber(row.casino_id)
-        local payable = amount > 0 and (row.item ~= nil or Casinos[casinoId] ~= nil)
-        if payable and IsPlayerOnline(source) then
-            local deleted = MySQL.update.await("DELETE FROM `pickle_casino_pending_refunds` WHERE `id` = ?", { row.id })
-            if deleted and deleted > 0 then
-                if row.item then
-                    Inventory.AddItem(source, row.item, amount)
-                else
-                    AddCasinoChips(source, casinoId, amount)
+    if not identifier or RefundPayouts[identifier] then return end
+    local session = GetCasinoPlayerSession(source)
+    RefundPayouts[identifier] = true
+    local ok, err = pcall(function()
+        local rows = MySQL.query.await("SELECT `id`, `casino_id`, `item`, `amount` FROM `pickle_casino_pending_refunds` WHERE `identifier` = ?", { identifier }) or {}
+        for _, row in ipairs(rows) do
+            if not IsCasinoPlayerSession(source, session) then break end
+            local amount = math.floor(tonumber(row.amount) or 0)
+            local casinoId = tonumber(row.casino_id)
+            if amount > 0 and (row.item ~= nil or Casinos[casinoId] ~= nil) then
+                local deleted = MySQL.update.await("DELETE FROM `pickle_casino_pending_refunds` WHERE `id` = ?", { row.id })
+                if deleted and deleted > 0 then
+                    local paid = false
+                    if IsCasinoPlayerSession(source, session) then
+                        local granted, result = pcall(function()
+                            if row.item then return Inventory.AddItem(source, row.item, amount) end
+                            return AddCasinoChips(source, casinoId, amount, true)
+                        end)
+                        paid = granted and result ~= false
+                        if not granted then print("^1[pickle_casinos] refund grant failed: " .. tostring(result) .. "^0") end
+                    end
+                    if paid then
+                        ShowNotification(source, _L("pending_refund_paid", NumberWithCommas(amount, true)))
+                    else
+                        QueuePendingRefund(source, casinoId, row.item, amount, identifier)
+                    end
                 end
-                ShowNotification(source, _L("pending_refund_paid", NumberWithCommas(amount, true)))
             end
         end
-    end
+    end)
+    RefundPayouts[identifier] = nil
+    if not ok then print("^1[pickle_casinos] refund payout failed: " .. tostring(err) .. "^0") end
 end
 
 -- Returns true if the inventory knows this item, false if it doesn't, or nil
@@ -1001,7 +1047,7 @@ end)
 
 local LastInitialize = {}
 
-AddEventHandler("playerDropped", function()
+AddEventHandler("pickle_casinos:playerUnloaded", function(source)
     LastInitialize[source] = nil
 end)
 
@@ -1027,7 +1073,7 @@ RegisterNetEvent("pickle_casinos:createCasino", function(data)
     local chipItem = ValidateChipItem(source, data.chipItem)
     if not chipItem then return end
     local casinoSettings = {
-        label = type(data.label) == "string" and data.label or "UNKNOWN_LABEL",
+        label = SanitizeCasinoLabel(data.label),
         location = SanitizeLocation(data.location),
         chipItem = chipItem,
         blipEnabled = data.blipEnabled or false,
@@ -1072,10 +1118,7 @@ RegisterNetEvent("pickle_casinos:updateCasinoSetting", function(casinoId, variab
     local casino = Casinos[casinoId]
     if not casino then return end
     if variable == "label" then
-        casino.settings.label = tostring(value) or "INVALID_LABEL"
-        if casino.settings.label == PERSONAL_CASINOS_LABEL then
-            casino.settings.label = "INVALID_LABEL"
-        end
+        casino.settings.label = SanitizeCasinoLabel(value)
     elseif variable == "chipItem" then
         if casino.settings.label == PERSONAL_CASINOS_LABEL then return end
         local chipItem = ValidateChipItem(source, value, casinoId)

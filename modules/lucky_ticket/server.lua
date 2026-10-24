@@ -61,15 +61,16 @@ function RegisterLuckyTicketWager(source, gameKey, chips)
     local perTicket = tonumber(cfg.chipsPerTicket) or 0
     if perTicket <= 0 then return end
 
+    local session = GetCasinoPlayerSession(source)
     loadProgress(identifier, function(entry)
         entry.wager_total = (entry.wager_total or 0) + chips
         local totalEarned = math.floor(entry.wager_total / perTicket)
         local newTickets = totalEarned - (entry.tickets_earned or 0)
         if newTickets > 0 then
             local itemName = getItemName()
-            Inventory.AddItem(source, itemName, newTickets)
+            RefundCasinoItem(source, itemName, newTickets, not IsCasinoPlayerSession(source, session), identifier)
             entry.tickets_earned = totalEarned
-            if ShowNotification then
+            if ShowNotification and IsCasinoPlayerSession(source, session) then
                 ShowNotification(source, _L("ticket_earned", newTickets))
             end
         end
@@ -134,9 +135,9 @@ RegisterCommand("setwheelticket", function(source, args)
 end, false)
 
 -- Clean up cache on disconnect (final save already happens on every update).
-AddEventHandler('playerDropped', function()
+AddEventHandler("pickle_casinos:playerUnloaded", function(source)
     local src = source
-    local identifier = GetIdentifier and GetIdentifier(src) or nil
+    local identifier = GetKnownIdentifier(src)
     if identifier and LuckyTicketProgress[identifier] then
         local entry = LuckyTicketProgress[identifier]
         saveProgress(identifier, entry)

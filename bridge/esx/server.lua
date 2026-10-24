@@ -104,17 +104,22 @@ end
 
 function AddMoney(source, count, currency)
     local xPlayer = ESX.GetPlayerFromId(source)
-    if not xPlayer then return end
+    if not xPlayer then return false end
     local currency = currency or "money"
+    local before = GetMoney(source, currency)
     local item = GetCurrencyItem(currency)
     if item then
-        Inventory.AddItem(source, item, count)
+        local success = Inventory.AddItem(source, item, count)
+        TriggerClientEvent("pickle_casinos:updateMoney", source, GetMoney(source, currency))
+        return success
     elseif (currency == "money") then
         xPlayer.addMoney(count)
     elseif (currency == "dirty") then
         xPlayer.addAccountMoney("black_money", count)
     end
-    TriggerClientEvent("pickle_casinos:updateMoney", source, GetMoney(source, currency))
+    local after = GetMoney(source, currency)
+    TriggerClientEvent("pickle_casinos:updateMoney", source, after)
+    return after - before >= count
 end
 
 -- Removes money and returns true only if it was really taken. For item-based
@@ -178,18 +183,6 @@ function GetOwnedVehicleFromPlate(plate)
         ['@plate'] = plate,
     })[1]
     return data and {owner = data.owner} or nil 
-end
-
-function AddOwnedVehicle(source, plate, model)
-    local xPlayer = ESX.GetPlayerFromId(source)
-    MySQL.Async.execute("INSERT INTO owned_vehicles (owner, plate, vehicle) VALUES (@owner, @plate, @vehicle);", {
-        ['@owner'] = xPlayer.identifier,
-        ['@plate'] = plate,
-        ['@vehicle'] = json.encode({
-            plate = toupper(plate),
-            model = joaat(model),
-        }),
-    })
 end
 
 function UpdateVehiclePlate(source, plate, newPlate)
@@ -297,24 +290,16 @@ end
 
 function AddOwnedVehicle(source, model)
     local xPlayer = ESX.GetPlayerFromId(source)
-    local plate = ""
-    local letters = {"A", "B", "C", "D", "E", "F", "G", "H", "I", "J", "K", "L", "M", "N", "O", "P", "Q", "R", "S", "T", "U", "V", "W", "X", "Y", "Z"}
-    local numbers = {"0", "1", "2", "3", "4", "5", "6", "7", "8", "9"}
-    for i = 1, 3 do
-        plate = plate .. letters[math.random(1, #letters)]
-    end
-    plate = plate .. " "
-    for i = 1, 3 do
-        plate = plate .. numbers[math.random(1, #numbers)]
-    end
-    MySQL.Async.execute("INSERT INTO owned_vehicles (owner, plate, vehicle) VALUES (@owner, @plate, @vehicle);", {
-        ['@owner'] = xPlayer.identifier,
-        ['@plate'] = plate,
-        ['@vehicle'] = json.encode({
-            plate = toupper(plate),
-            model = joaat(model),
-        }),
-    })
+    if not xPlayer then return false end
+    local identifier = xPlayer.identifier
+    return InsertCasinoPrizeVehicle(function(plate)
+        local changed = MySQL.Sync.execute("INSERT IGNORE INTO owned_vehicles (owner, plate, vehicle) VALUES (@owner, @plate, @vehicle)", {
+            ['@owner'] = identifier,
+            ['@plate'] = plate,
+            ['@vehicle'] = json.encode({ plate = plate, model = joaat(model) }),
+        })
+        return changed ~= nil and changed > 0
+    end)
 end
 
 -- Inventory Fallback
