@@ -8,15 +8,15 @@ function DoesThunderRouletteLobbyExist(casinoId, entityId)
 end
 
 function JoinThunderRouletteEntity(source, casinoId, entityId, seatId)
-    local seatId = seatId or 1
     local casino = Casinos[casinoId]
     if not casino then return end
     local entity = GetCasinoEntity(casinoId, entityId)
     if not entity then return end
+    local seatId = SanitizeInt(seatId, 1, #entity.seats) or 1
     if CurrentPlayers[source] then
         for i=1, #entity.seats do
             if entity.seats[i].source == source then
-                entity.seats[seatId].inSeat = true
+                entity.seats[i].inSeat = true
                 debugPrint("PLAYER IS ALREADY IN SEAT", i)
                 return i
             end
@@ -117,11 +117,10 @@ function ProcessThunderRouletteWager(casinoId, entityId, seat)
     local totalWager = GetThunderRouletteTotalWager(entity.seats[seat].connects)
     if totalWager == 0 then return end
     local wager = totalWager
-    if GetCasinoChips(entity.seats[seat].source, casinoId) < wager then
+    if GetCasinoChips(entity.seats[seat].source, casinoId) < wager or not RemoveCasinoChips(entity.seats[seat].source, casinoId, wager) then
         ShowNotification(entity.seats[seat].source, _L("insufficient_chips_bet"))
         return false
     end
-    RemoveCasinoChips(entity.seats[seat].source, casinoId, wager)
     RegisterLuckyTicketWager(entity.seats[seat].source, "thunder_roulette", wager)
     return true
 end
@@ -183,7 +182,8 @@ function StartThunderRouletteGame(casinoId, entityId)
         StartThunderRouletteLobby(casinoId, entityId)
         return
     end
-    CreateThread(function()
+    entity.roundPaid = false
+    CreateSafeGameThread("thunder_roulette", function()
         local cfg = Config.ThunderRoulette or {}
         local spinDuration = cfg.SpinDuration or 20000
         local thunder = GenerateThunderRound()
@@ -192,6 +192,7 @@ function StartThunderRouletteGame(casinoId, entityId)
         TriggerClientCasinoEvent("pickle_casinos:thunder_roulette:updateStage", -1, casinoId, entityId, entity.stage)
         Wait(spinDuration)
         local seats = {}
+        entity.roundPaid = true
         for i=1, #entity.seats do
             local seat = entity.seats[i]
             local connects = seat.connects
@@ -251,6 +252,17 @@ function StartThunderRouletteGame(casinoId, entityId)
             end)
         end
         Wait(1000)
+        StartThunderRouletteLobby(casinoId, entityId)
+    end, function()
+        -- The round crashed: refund stakes if payouts hadn't started, then reopen the table.
+        for i, seat in pairs(entity.seats) do
+            if seat.source and not entity.roundPaid and IsPlayerOnline(seat.source) then
+                local refund = GetThunderRouletteTotalWager(seat.connects)
+                if refund > 0 then AddCasinoChips(seat.source, casinoId, refund) end
+            end
+            seat.connects = GenerateThunderRouletteDefaultWagers()
+        end
+        entity.stage = {type = "waiting", time = 0}
         StartThunderRouletteLobby(casinoId, entityId)
     end)
 end
@@ -347,6 +359,7 @@ RegisterCallback("pickle_casinos:repeatThunderRouletteWager", function(source, c
 end)
 
 RegisterCallback("pickle_casinos:thunder_roulette:requestSeat", function(source, cb, casinoId, entityId, seatId)
+    if not CanUseCasinoEntity(source, casinoId, entityId, "thunder_roulette") then return cb(nil) end
     local seatId = JoinThunderRouletteEntity(source, casinoId, entityId, seatId)
     local entity = GetThunderRouletteEntity(casinoId, entityId)
     if seatId then

@@ -35,3 +35,17 @@ end
 function GetCurrencyString(amount)
     return NumberWithCommas(amount)
 end
+
+-- Returns `value` as an integer when it is a finite whole number within
+-- [min, max] (either bound optional), otherwise nil. Use this for every
+-- quantity that arrives from a client (wagers, amounts, indexes, settings):
+-- net events can carry any Lua type, including floats, NaN and infinity.
+function SanitizeInt(value, min, max)
+    value = tonumber(value)
+    if not value or value ~= value or value == math.huge or value == -math.huge then return nil end
+    if value ~= math.floor(value) then return nil end
+    value = math.tointeger(value) or value
+    if min and value < min then return nil end
+    if max and value > max then return nil end
+    return value
+end

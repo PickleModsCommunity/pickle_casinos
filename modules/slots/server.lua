@@ -152,17 +152,20 @@ RegisterNetEvent("pickle_casinos:slots:redeemSpin", function(id, spinIndex)
     local spin = slotSpin.spins[spinIndex]
     if not spin or spin.redeemed then return end
     debugPrint("Redeeming spin", id, spinIndex, slotSpin.bet)
-    local calculatedWin = GetSpinCalculatedWin(slotSpin.gameId, spin, slotSpin.bet) 
+    spin.redeemed = true
+    local calculatedWin = GetSpinCalculatedWin(slotSpin.gameId, spin, slotSpin.bet) or 0
     local playerMoney = GetCasinoChips(source, slotSpin.casinoId)
     if calculatedWin > 0 then
         playerMoney = playerMoney + calculatedWin
         AddCasinoChips(source, slotSpin.casinoId, calculatedWin)
         ShowNotification(source, _L("spin_won", GetCurrencyString(calculatedWin)))
     end
-    EndCasinoGameplayTransaction(slotSpin.transaction, source, slotSpin.casinoId, slotSpin.entityId, "slots", calculatedWin)  
+    slotSpin.totalWin = (slotSpin.totalWin or 0) + calculatedWin
+    slotSpin.redeemedCount = (slotSpin.redeemedCount or 0) + 1
     TriggerClientEvent("pickle_casinos:updateBalance", source, playerMoney)
-    spin.redeemed = true
-    if spinIndex >= #slotSpin.spins then
+    -- Log the round once, with the bet against the total of every redeemed spin.
+    if slotSpin.redeemedCount >= #slotSpin.spins then
+        EndCasinoGameplayTransaction(slotSpin.transaction, source, slotSpin.casinoId, slotSpin.entityId, "slots", slotSpin.totalWin)
         PendingSpins[id] = nil
     end
 end)
@@ -178,10 +181,14 @@ RegisterNetEvent("pickle_casinos:slots:leaveSlotMachine", function()
 end)
 
 RegisterCallback("pickle_casinos:slots:requestSeat", function(source, cb, casinoId, entityId)
-    local casino = Casinos[casinoId]
-    if not casino then return end
-    local entity = GetCasinoEntity(casinoId, entityId)
-    if not entity then return end
+    local canUse, casino, entity = CanUseCasinoEntity(source, casinoId, entityId, "slot")
+    if not canUse then return cb(nil) end
+    -- One machine per player.
+    local current = GetPlayerSlotInfo(source)
+    if current and (current.casinoId ~= casinoId or current.entityId ~= entityId) then
+        cb(nil)
+        return
+    end
     if entity.currentPlayer then
         cb(nil)
         return
@@ -207,13 +214,13 @@ RegisterCallback("pickle_casinos:slots:spinSlot", function(source, cb, betIndex)
     betIndex = betIndex or 1
     local bet = entity.bets[betIndex]
     if not bet then bet = entity.bets[1] end
+    if not Config.Slots[entity.settings.game] then return cb(nil) end
     local playerMoney = GetCasinoChips(source, casinoId)
-    if playerMoney < bet then
+    if playerMoney < bet or not RemoveCasinoChips(source, casinoId, bet) then
         ShowNotification(source, _L("not_enough_money_spin"))
         return cb(nil)
     end
     playerMoney = playerMoney - bet
-    RemoveCasinoChips(source, casinoId, bet)
     RegisterLuckyTicketWager(source, "slots", bet)
     local spinId = GenerateSpinId()
     local spin = GenerateSpin(Config.Slots[entity.settings.game])
@@ -232,6 +239,12 @@ end)
 
 AddEventHandler('playerDropped', function()
     local source = source
+    -- Unredeemed spins can't be paid to a disconnected player; don't keep them forever.
+    for id, spin in pairs(PendingSpins) do
+        if spin.source == source then
+            PendingSpins[id] = nil
+        end
+    end
     local playerInfo = GetPlayerSlotInfo(source)
     if not playerInfo then return end
     local casinoId = playerInfo.casinoId

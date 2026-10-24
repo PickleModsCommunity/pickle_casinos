@@ -289,4 +289,7 @@ Language["en"] = {
     personal_casinos_dialog = "Manage casino entity?",
     personal_casinos_entity_exit = "Exit Casino Entity",
     casino_entity_location_error = "You must set a location for the entity to create it.",
+    invalid_amount = "That amount is not valid.",
+    casino_entity_in_use = "This can't be changed while players are using it or a round is in progress.",
+    invalid_wager = "That wager is not valid for this table.",
 }

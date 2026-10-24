@@ -13,24 +13,37 @@ local function SaveAndSync(casinoId, casino)
     TriggerClientEvent("pickle_casinos:syncAudioZones", -1, casinoId, casino.settings.audio_zones)
 end
 
+-- Every zone/point is saved to the DB and broadcast to all players, so keep them bounded.
+local MAX_AUDIO_ZONES = 32
+local MAX_ZONE_POINTS = 64
+
+local function ToPoint(p)
+    if type(p) ~= "table" and type(p) ~= "vector3" then return nil end
+    local x, y, z = tonumber(p.x), tonumber(p.y), tonumber(p.z)
+    if not x or not y or not z or x ~= x or y ~= y or z ~= z then return nil end
+    if math.abs(x) > 1e5 or math.abs(y) > 1e5 or math.abs(z) > 1e5 then return nil end
+    return { x = x, y = y, z = z }
+end
+
 RegisterNetEvent("pickle_casinos:addAudioZone", function(casinoId, zoneData)
     local source = source
     if not CanManageCasino(source, casinoId) then return ShowNotification(source, _L("no_permission")) end
     local casino = Casinos[casinoId]
     if not casino then return end
     if casino.settings.label == PERSONAL_CASINOS_LABEL then return end
-    if not GetAudioPreset(zoneData.preset) then return end
+    if type(zoneData) ~= "table" or not GetAudioPreset(zoneData.preset) then return end
 
     if not casino.settings.audio_zones then
         casino.settings.audio_zones = {}
     end
+    if #casino.settings.audio_zones >= MAX_AUDIO_ZONES then return end
 
     local points = {}
-    if zoneData.points then
-        for i = 1, #zoneData.points do
-            local p = zoneData.points[i]
-            if p and p.x and p.y and p.z then
-                table.insert(points, { x = p.x, y = p.y, z = p.z })
+    if type(zoneData.points) == "table" then
+        for i = 1, math.min(#zoneData.points, MAX_ZONE_POINTS) do
+            local p = ToPoint(zoneData.points[i])
+            if p then
+                table.insert(points, p)
             end
         end
     end
@@ -67,12 +80,14 @@ RegisterNetEvent("pickle_casinos:addAudioZonePoint", function(casinoId, zoneId, 
     if not CanManageCasino(source, casinoId) then return ShowNotification(source, _L("no_permission")) end
     local casino = Casinos[casinoId]
     if not casino then return end
-    if not coords or not coords.x or not coords.y or not coords.z then return end
+    local point = ToPoint(coords)
+    if not point then return end
 
     local zone = GetAudioZone(casino, zoneId)
     if not zone then return end
+    if #zone.points >= MAX_ZONE_POINTS then return end
 
-    table.insert(zone.points, { x = coords.x, y = coords.y, z = coords.z })
+    table.insert(zone.points, point)
     SaveAndSync(casinoId, casino)
 end)
 

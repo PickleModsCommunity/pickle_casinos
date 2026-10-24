@@ -52,12 +52,49 @@ function TriggerClientCasinoEvent(eventName, target, casinoId, entityId, ...)
     TriggerClientEvent(eventName, target, casinoId, entityId, ...)
 end
 
+local GameplayTransactionCounter = 0
+
 function StartCasinoGameplayTransaction(source, casinoId, entityId, gameType, wagerAmount)
-    local id = os.time() .. "_" .. source
+    GameplayTransactionCounter = GameplayTransactionCounter + 1
+    local id = os.time() .. "_" .. source .. "_" .. GameplayTransactionCounter
     TriggerEvent("pickle_casinos:gameplay:startTransaction", id, source, casinoId, entityId, gameType, wagerAmount)
     return id
 end
 
 function EndCasinoGameplayTransaction(id, source, casinoId, entityId, gameType, winAmount)
     TriggerEvent("pickle_casinos:gameplay:endTransaction", id, source, casinoId, entityId, gameType, winAmount)
+end
+
+-- True while the player is still connected. Use before paying out after a delay.
+function IsPlayerOnline(source)
+    source = tonumber(source)
+    if not source or source < 1 then return false end
+    return GetPlayerName(source) ~= nil
+end
+
+-- True if the player's ped is within `distance` of `coords` (server-side check).
+-- Returns nil when the server can't see the ped (e.g. OneSync disabled), so
+-- callers can decide whether that should block the action.
+function IsPlayerNearCoords(source, coords, distance)
+    if not coords then return false end
+    local ped = GetPlayerPed(source)
+    if not ped or ped == 0 then return nil end
+    local pedCoords = GetEntityCoords(ped)
+    return #(pedCoords - vector3(coords.x, coords.y, coords.z)) <= distance
+end
+
+-- Runs a game loop body in a thread and logs instead of silently killing the
+-- table when it errors. `onError` is called afterwards so the game can recover
+-- (normally by restarting its lobby).
+function CreateSafeGameThread(label, fn, onError)
+    CreateThread(function()
+        local ok, err = pcall(fn)
+        if not ok then
+            print(("^1[pickle_casinos] %s loop error: %s^0"):format(label, tostring(err)))
+            if onError then
+                Wait(1000)
+                pcall(onError)
+            end
+        end
+    end)
 end

@@ -97,9 +97,10 @@ function EnsureCasinoSettings(settings)
     if not newSettings.isOpen then newSettings.isOpen = false end
     if not newSettings.cashEnabled then newSettings.cashEnabled = false end
     if not newSettings.markedEnabled then newSettings.markedEnabled = false end
-    if tonumber(newSettings.moneyExchangeRate or "a") == nil then newSettings.moneyExchangeRate = 100 end
-    if tonumber(newSettings.dirtyExchangeRate or "a") == nil then newSettings.dirtyExchangeRate = 75 end
-    if tonumber(newSettings.vipPrice or "a") == nil then newSettings.vipPrice = 1000 end
+    local rateLimits = Config.ExchangeRateLimits or { min = 1, max = 100 }
+    newSettings.moneyExchangeRate = SanitizeInt(newSettings.moneyExchangeRate, rateLimits.min, rateLimits.max) or math.min(100, rateLimits.max)
+    newSettings.dirtyExchangeRate = SanitizeInt(newSettings.dirtyExchangeRate, rateLimits.min, rateLimits.max) or math.min(75, rateLimits.max)
+    newSettings.vipPrice = SanitizeInt(newSettings.vipPrice, 0) or 1000
     return newSettings
 end
 
@@ -129,7 +130,7 @@ function RegisterCasino(id, data, dontSync)
         entities = InitializeCasinoEntities(id, data.entities or {})
     }
     if dontSync then return end
-    TriggerClientEvent("pickle_casinos:registerCasino", -1, id, Casinos[id])
+    TriggerClientEvent("pickle_casinos:registerCasino", -1, id, GetPublicCasino(Casinos[id]))
 end
 
 function JoinCasinoEntity(source, casinoId, entityId)
@@ -194,7 +195,7 @@ function SendCasinoEntityUpdate(casinoId, entityId)
     if not casino then return end
     local entity = GetCasinoEntity(casinoId, entityId)
     if not entity then return end
-    TriggerClientEvent("pickle_casinos:updateCasinoEntity", -1, casinoId, entity)
+    TriggerClientEvent("pickle_casinos:updateCasinoEntity", -1, casinoId, GetPublicCasinoEntity(entity))
 end
 
 function GenerateEntityId(casinoId)
@@ -207,50 +208,169 @@ function GenerateEntityId(casinoId)
     return entityId
 end
 
+CASINO_ENTITY_TYPES = {
+    blackjack = true, roulette = true, thunder_roulette = true, baccarat = true, slot = true,
+    poker = true, wheel = true, luckywheel = true, horseracing = true, cashier = true, store = true,
+}
+
+-- Settings keys an owner may change through updateCasinoEntitySetting, per entity type.
+local WAGER_GAMES = { blackjack = true, roulette = true, thunder_roulette = true, baccarat = true, slot = true, wheel = true, horseracing = true }
+local TABLE_GAMES = { blackjack = true, roulette = true, thunder_roulette = true, baccarat = true, poker = true }
+local TYPE_SETTING_KEYS = {
+    poker = { smallBlind = true, bigBlind = true },
+    slot = { game = true },
+    cashier = { dealerModel = true },
+    store = { dealerModel = true, store = true },
+    luckywheel = { wheelModel = true, spinPrice = true, costsTickets = true, vehicleLocation = true },
+}
+
+function IsEntitySettingAllowed(entityType, key)
+    if type(key) ~= "string" then return false end
+    if key == "location" or key == "vip" then return true end
+    if key == "maxWager" and WAGER_GAMES[entityType] then return true end
+    if (key == "tableModel" or key == "dealerModel") and TABLE_GAMES[entityType] then return true end
+    local keys = TYPE_SETTING_KEYS[entityType]
+    return keys ~= nil and keys[key] == true
+end
+
+local function SanitizeNumber(value, fallback)
+    value = tonumber(value)
+    if not value or value ~= value or value == math.huge or value == -math.huge then return fallback end
+    return value
+end
+
+local function SanitizeVector(v)
+    local t = type(v)
+    if t ~= "table" and t ~= "vector3" and t ~= "vector4" then return vector3(0, 0, 0) end
+    return vector3(SanitizeNumber(v.x, 0), SanitizeNumber(v.y, 0), SanitizeNumber(v.z, 0))
+end
+
+function SanitizeLocation(location)
+    if type(location) ~= "table" then return { coords = vector3(0, 0, 0), rotation = vector3(0, 0, 0) } end
+    return { coords = SanitizeVector(location.coords), rotation = SanitizeVector(location.rotation) }
+end
+
+local function SanitizeModel(model)
+    if type(model) == "number" and model == math.floor(model) then return model end
+    return nil
+end
+
+local function GetDefaultSlotGame()
+    local keys = {}
+    for k in pairs(Config.Slots or {}) do keys[#keys + 1] = k end
+    table.sort(keys)
+    return keys[1]
+end
+
+-- Every value here can come from a client (createCasinoEntity /
+-- updateCasinoEntitySetting), so each one is type- and range-checked.
 function EnsureGameSettings(entityType, settings)
+    settings = type(settings) == "table" and settings or {}
     local defaultSettings = {
-        location = settings.location and {
-            coords = vector3(settings.location.coords.x, settings.location.coords.y, settings.location.coords.z) or vector3(0, 0, 0),
-            rotation = settings.location.rotation and vector3(settings.location.rotation.x, settings.location.rotation.y, settings.location.rotation.z) or vector3(0, 0, 0)
-        } or {
-            coords = vector3(0, 0, 0),
-            rotation = vector3(0, 0, 0)
-        },
+        location = SanitizeLocation(settings.location),
         vip = settings.vip and true or false,
     }
-    if entityType == "blackjack" or entityType == "roulette" or entityType == "thunder_roulette" or entityType == "baccarat" or entityType == "slot" or entityType == "wheel" or entityType == "horseracing" then
-        defaultSettings["maxWager"] = settings.maxWager or 1000
-        if Config.MaxWager and defaultSettings["maxWager"] > Config.MaxWager then
-            defaultSettings["maxWager"] = Config.MaxWager
+    if WAGER_GAMES[entityType] then
+        -- At least 100 so the minimum bet (maxWager / 100) is a whole chip.
+        local maxWager = SanitizeInt(settings.maxWager, 1)
+        maxWager = maxWager and math.max(100, maxWager) or 1000
+        if Config.MaxWager and maxWager > Config.MaxWager then
+            maxWager = math.max(100, math.floor(Config.MaxWager))
         end
+        defaultSettings["maxWager"] = maxWager
     end
-    if entityType == "blackjack" or entityType == "roulette" or entityType == "thunder_roulette" or entityType == "baccarat" or entityType == "poker" then
-        defaultSettings["tableModel"] = settings.tableModel
-        defaultSettings["dealerModel"] = settings.dealerModel
+    if TABLE_GAMES[entityType] then
+        defaultSettings["tableModel"] = SanitizeModel(settings.tableModel)
+        defaultSettings["dealerModel"] = SanitizeModel(settings.dealerModel)
     end
     if entityType == "cashier" or entityType == "store" then
-        defaultSettings["dealerModel"] = settings.dealerModel
+        defaultSettings["dealerModel"] = SanitizeModel(settings.dealerModel)
     end
     if entityType == "luckywheel" then
-        defaultSettings["wheelModel"] = settings.wheelModel
-        defaultSettings["spinPrice"] = settings.spinPrice or 0
+        defaultSettings["wheelModel"] = SanitizeModel(settings.wheelModel)
+        defaultSettings["spinPrice"] = SanitizeInt(settings.spinPrice, 0) or 0
         defaultSettings["costsTickets"] = settings.costsTickets and true or false
-        defaultSettings["vehicleLocation"] = settings.vehicleLocation and {
-            coords = vector3(settings.vehicleLocation.coords.x, settings.vehicleLocation.coords.y, settings.vehicleLocation.coords.z) or vector3(0, 0, 0),
-            rotation = vector3(settings.vehicleLocation.rotation.x, settings.vehicleLocation.rotation.y, settings.vehicleLocation.rotation.z) or vector3(0, 0, 0)
-        } or { coords = vector3(0, 0, 0), rotation = vector3(0, 0, 0) }
+        defaultSettings["vehicleLocation"] = SanitizeLocation(settings.vehicleLocation)
     end
     if entityType == "store" then
-        defaultSettings["store"] = settings.store or 1
+        local stores = Config.CreatorOptions and Config.CreatorOptions.stores or {}
+        defaultSettings["store"] = SanitizeInt(settings.store, 1, math.max(1, #stores)) or 1
     end
     if entityType == "slot" then
-        defaultSettings["game"] = settings.game
+        defaultSettings["game"] = (type(settings.game) == "string" and Config.Slots[settings.game]) and settings.game or GetDefaultSlotGame()
     end
     if entityType == "poker" then
-        defaultSettings["smallBlind"] = settings.smallBlind or 10
-        defaultSettings["bigBlind"] = settings.bigBlind or 20
+        local maxBlind = math.max(2, math.floor((Config.MaxWager or 1000000) / 100))
+        local smallBlind = SanitizeInt(settings.smallBlind, 1) or 10
+        smallBlind = math.min(smallBlind, maxBlind)
+        local bigBlind = SanitizeInt(settings.bigBlind, 1) or (smallBlind * 2)
+        bigBlind = math.min(math.max(bigBlind, smallBlind), maxBlind)
+        defaultSettings["smallBlind"] = smallBlind
+        defaultSettings["bigBlind"] = bigBlind
     end
     return defaultSettings
+end
+
+-- True while anyone is seated, playing or spinning. Changing settings
+-- re-initialises the entity, which would wipe live seats and escrow. (Stage is
+-- not used: tables keep their last stage after everyone has left.)
+function IsCasinoEntityInUse(entity)
+    if not entity then return false end
+    if entity.seats then
+        for _, seat in pairs(entity.seats) do
+            if seat and seat.source and seat.source ~= 0 then return true end
+        end
+    end
+    if entity.players and next(entity.players) ~= nil then return true end
+    if entity.currentPlayer or entity.spinner then return true end
+    return false
+end
+
+-- Fields that must never leave the server.
+local PRIVATE_ENTITY_FIELDS = { sectionIndex = true, spinner = true, pendingSpin = true, players = true }
+
+-- Client-safe copy of an entity: hides poker hole cards and server-only state.
+function GetPublicCasinoEntity(entity)
+    if type(entity) ~= "table" then return entity end
+    local out = {}
+    for k, v in pairs(entity) do
+        if not PRIVATE_ENTITY_FIELDS[k] then out[k] = v end
+    end
+    if entity.type == "poker" and type(entity.seats) == "table" then
+        local seats = {}
+        for i, seat in pairs(entity.seats) do
+            seats[i] = GetObfuscuatedSeat(seat)
+        end
+        out.seats = seats
+    end
+    return out
+end
+
+-- Client-safe copy of a casino. VIP membership lists (identifiers) stay server-side.
+function GetPublicCasino(casino)
+    if type(casino) ~= "table" then return casino end
+    local entities = {}
+    for i = 1, #(casino.entities or {}) do
+        entities[i] = GetPublicCasinoEntity(casino.entities[i])
+    end
+    return {
+        id = casino.id,
+        balance = casino.balance,
+        marked_balance = casino.marked_balance,
+        owner_info = casino.owner_info,
+        vip_players = {},
+        transactions = {},
+        settings = casino.settings,
+        entities = entities,
+    }
+end
+
+function GetPublicCasinos()
+    local out = {}
+    for id, casino in pairs(Casinos) do
+        out[id] = GetPublicCasino(casino)
+    end
+    return out
 end
 
 function UpdateCasinoEntitiesSQL(casinoId)
@@ -288,7 +408,10 @@ function IsPlayerCasinoVIP(source, casinoId)
     local casino = Casinos[casinoId]
     if not casino then return false end
     local player = GetPlayerCasinoInfo(source, casinoId)
-    return player.startTime ~= nil
+    if not player or not player.startTime then return false end
+    local expireTime = Config.Casinos.vipExpireTime or 0
+    if expireTime > 0 and (player.startTime + expireTime) < os.time() then return false end
+    return true
 end
 
 -- Sources currently viewing a casino's management UI, keyed by casinoId.
@@ -414,19 +537,70 @@ end
 function AddCasinoChips(source, casinoId, amount)
     local casino = Casinos[casinoId]
     if not casino then return end
+    -- Payouts like 2.5x or 0.95x can be fractional; pay whole chips instead of
+    -- leaving the rounding to the inventory.
+    amount = tonumber(amount)
+    if not amount or amount ~= amount or amount == math.huge then return end
+    amount = math.floor(amount)
+    if amount <= 0 then return end
     if casino.settings.label == PERSONAL_CASINOS_LABEL then 
         return AddMoney(source, amount)
     end
     Inventory.AddItem(source, casino.settings.chipItem, amount)
 end
 
+-- Removes chips and returns true only if the full amount was actually taken.
+-- Amounts must be positive integers: inventories round fractional counts.
 function RemoveCasinoChips(source, casinoId, amount)
     local casino = Casinos[casinoId]
-    if not casino then return end
-    if casino.settings.label == PERSONAL_CASINOS_LABEL then 
-        return RemoveMoney(source, amount)
+    if not casino then return false end
+    amount = SanitizeInt(amount, 1)
+    if not amount then return false end
+    if casino.settings.label == PERSONAL_CASINOS_LABEL then
+        return TryRemoveMoney(source, amount)
     end
+    local before = Inventory.GetItemCount(source, casino.settings.chipItem) or 0
+    if before < amount then return false end
     Inventory.RemoveItem(source, casino.settings.chipItem, amount)
+    local after = Inventory.GetItemCount(source, casino.settings.chipItem) or 0
+    return (before - after) >= amount
+end
+
+-- Removes money and returns true only if the full amount was actually taken.
+function TryRemoveMoney(source, amount, currency)
+    amount = SanitizeInt(amount, 1)
+    if not amount then return false end
+    local before = GetMoney(source, currency) or 0
+    if before < amount then return false end
+    RemoveMoney(source, amount, currency)
+    local after = GetMoney(source, currency) or 0
+    return (before - after) >= amount
+end
+
+-- Shared guard for player-facing interactions with a casino entity: the casino
+-- must exist and be open (managers excepted), the entity must have the expected
+-- type, VIP-only entities require VIP, and the player must be near it.
+function CanUseCasinoEntity(source, casinoId, entityId, expectedType)
+    local casino = Casinos[casinoId]
+    if not casino then return false end
+    local entity = GetCasinoEntity(casinoId, entityId)
+    if not entity then return false end
+    if expectedType and entity.type ~= expectedType then return false end
+    if not IsCasinoPersonalCasinos(casinoId) and not casino.settings.isOpen and not CanManageCasino(source, casinoId) then
+        ShowNotification(source, _L("casino_closed"))
+        return false
+    end
+    if entity.settings.vip and not IsPlayerCasinoVIP(source, casinoId) then
+        ShowNotification(source, _L("casino_vip_required"))
+        return false
+    end
+    local coords = entity.settings.location and entity.settings.location.coords
+    -- `false` means the ped is visible and too far away; `nil` (no server-side
+    -- ped, e.g. OneSync off) can't be checked and is allowed.
+    if coords and IsPlayerNearCoords(source, coords, (Config.InteractDistance or 2.5) + 7.5) == false then
+        return false
+    end
+    return true, casino, entity
 end
 
 function UpdatePlayerBalance(source, casinoId, noDelay)
@@ -481,6 +655,8 @@ RegisterCallback("pickle_casinos:getManagementStatus", function(source, cb, casi
 end)
 
 RegisterCallback("pickle_casinos:getPlayers", function(source, cb)
+    -- Only used by the admin owner picker; don't expose identifiers to everyone.
+    if not IsPlayerAdmin(source) then return cb({}) end
     local players = {}
     for _, playerId in ipairs(GetPlayers()) do
         players[#players + 1] = {
@@ -640,9 +816,18 @@ RegisterNetEvent("pickle_casinos:exitManagement", function(casinoId)
     UnregisterManagementViewer(source, casinoId)
 end)
 
+local LastInitialize = {}
+
+AddEventHandler("playerDropped", function()
+    LastInitialize[source] = nil
+end)
+
 RegisterNetEvent("pickle_casinos:initializePlayer", function()
     local source = source
-    TriggerClientEvent("pickle_casinos:syncCasinos", source, Casinos, GetIdentifier(source))
+    local now = os.time()
+    if LastInitialize[source] and (now - LastInitialize[source]) < 10 then return end
+    LastInitialize[source] = now
+    TriggerClientEvent("pickle_casinos:syncCasinos", source, GetPublicCasinos(), GetIdentifier(source))
     TriggerClientEvent("pickle_casinos:setupInventory", source, {
         items = Inventory.Items,
     })
@@ -651,15 +836,12 @@ RegisterNetEvent("pickle_casinos:initializePlayer", function()
 end)
 
 RegisterNetEvent("pickle_casinos:createCasino", function(data)
-    if not type(data) == "table" then return end
+    if type(data) ~= "table" then return end
     if not CanManageCasino(source) then return ShowNotification(source, _L("no_permission")) end
     local casinoSettings = {
-        label = data.label or "UNKNOWN_LABEL",
-        location = data.location or {
-            coords = vector3(0, 0, 0),
-            rotation = vector3(0, 0, 0)
-        },
-        chipItem = data.chipItem or "UNKNOWN_CHIP_ITEM",
+        label = type(data.label) == "string" and data.label or "UNKNOWN_LABEL",
+        location = SanitizeLocation(data.location),
+        chipItem = type(data.chipItem) == "string" and data.chipItem or "UNKNOWN_CHIP_ITEM",
         blipEnabled = data.blipEnabled or false,
         isOpen = true,
         cashEnabled = true,
@@ -717,14 +899,20 @@ RegisterNetEvent("pickle_casinos:updateCasinoSetting", function(casinoId, variab
     elseif variable == "markedEnabled" then
         casino.settings.markedEnabled = value and true or false
     elseif variable == "location" then
-        if not value or not value.coords or not value.rotation then return end
-        casino.settings.location = value
-    elseif variable == "moneyExchangeRate" then
-        casino.settings.moneyExchangeRate = tonumber(value) or 100
-    elseif variable == "dirtyExchangeRate" then
-        casino.settings.dirtyExchangeRate = tonumber(value) or 75
-    elseif variable == "vipPrice" then 
-        casino.settings.vipPrice = tonumber(value) or 1000  
+        if type(value) ~= "table" or not value.coords or not value.rotation then return end
+        casino.settings.location = SanitizeLocation(value)
+    elseif variable == "moneyExchangeRate" or variable == "dirtyExchangeRate" then
+        -- Rates above 100 would hand out more chips than the money paid.
+        local limits = Config.ExchangeRateLimits or { min = 1, max = 100 }
+        local rate = SanitizeInt(value, limits.min, limits.max)
+        if not rate then return ShowNotification(source, _L("invalid_amount")) end
+        casino.settings[variable] = rate
+    elseif variable == "vipPrice" then
+        local price = SanitizeInt(value, 0)
+        if not price then return ShowNotification(source, _L("invalid_amount")) end
+        casino.settings.vipPrice = price
+    else
+        return
     end
     casino.settings = EnsureCasinoSettings(casino.settings)
     MySQL.Async.execute('UPDATE `pickle_casinos` SET settings = ? WHERE id = ?', {json.encode(casino.settings), casinoId})
@@ -773,12 +961,16 @@ RegisterNetEvent("pickle_casinos:createCasinoEntity", function(casinoId, entityT
     if not IsCasinoPersonalCasinos(casinoId) and not CanManageCasino(source, casinoId) then return ShowNotification(source, _L("no_permission")) end
     local casino = Casinos[casinoId]
     if not casino then return end
+    if type(entityType) ~= "string" or not CASINO_ENTITY_TYPES[entityType] then return end
+    PerformCooldownProcess(source)
     if IsCasinoPersonalCasinos(casinoId) then
         local placeableCfg = Config.PlaceableEntities[entityType]
         if not placeableCfg then return end
         local item = placeableCfg.item
-        if Inventory.GetItemCount(source, item) < 1 then return end
+        local before = Inventory.GetItemCount(source, item) or 0
+        if before < 1 then return end
         Inventory.RemoveItem(source, item, 1)
+        if (Inventory.GetItemCount(source, item) or 0) >= before then return end
     end
     local entityId = GenerateEntityId(casinoId)
     local entity = {
@@ -795,7 +987,7 @@ RegisterNetEvent("pickle_casinos:createCasinoEntity", function(casinoId, entityT
     table.insert(casino.entities, entity)
     UpdateCasinoEntitiesSQL(casinoId)
     InitializeCasinoEntity(casinoId, entity)
-    TriggerClientEvent("pickle_casinos:createCasinoEntity", -1, casinoId, entity)
+    TriggerClientEvent("pickle_casinos:createCasinoEntity", -1, casinoId, GetPublicCasinoEntity(entity))
 end)
 
 RegisterNetEvent("pickle_casinos:deleteCasinoEntity", function(casinoId, entityId)
@@ -804,6 +996,7 @@ RegisterNetEvent("pickle_casinos:deleteCasinoEntity", function(casinoId, entityI
     if not casinoEntity then return end
     local isEntityOwner = (casinoEntity.owner_info and casinoEntity.owner_info.identifier == GetIdentifier(source))
     if not CanManageCasino(source, casinoId) and not isEntityOwner then return ShowNotification(source, _L("no_permission")) end
+    if IsCasinoEntityInUse(casinoEntity) then return ShowNotification(source, _L("casino_entity_in_use")) end
     local casino = Casinos[casinoId]
     if not casino then return end
     local entityType = nil
@@ -833,6 +1026,8 @@ RegisterNetEvent("pickle_casinos:updateCasinoEntitySetting", function(casinoId, 
     if not casino then return end
     local entity = GetCasinoEntity(casinoId, entityId)
     if not entity then return end
+    if not IsEntitySettingAllowed(entity.type, variable) then return end
+    if IsCasinoEntityInUse(entity) then return ShowNotification(source, _L("casino_entity_in_use")) end
     entity.settings[variable] = value
     entity.settings = EnsureGameSettings(entity.type, entity.settings)
     InitializeCasinoEntity(casinoId, entity, true)
@@ -843,22 +1038,22 @@ end)
 RegisterNetEvent("pickle_casinos:startCasinoTransfer", function(casinoId, transferInfo)
     local source = source
     if not CanManageCasino(source, casinoId) then return ShowNotification(source, _L("no_permission")) end
+    PerformCooldownProcess(source)
     local casino = Casinos[casinoId]
     if not casino then return end
+    if type(transferInfo) ~= "table" then return end
     local transferType = transferInfo.type
     local balanceType = transferInfo.balanceType
-    local amount = transferInfo.amount
-    local money = GetMoney(source)
-    local marked_money = GetMoney(source, "dirty")
-    if amount <= 0 then return ShowNotification(source, _L("invalid_amount")) end
+    local amount = SanitizeInt(transferInfo.amount, 1)
+    if not amount then return ShowNotification(source, _L("invalid_amount")) end
+    if transferType ~= "deposit" and transferType ~= "withdraw" then return end
+    if balanceType ~= "balance" and balanceType ~= "marked_balance" then return end
     if transferType == "deposit" then
         if balanceType == "balance" then
-            if money < amount then return ShowNotification(source, _L("insufficient_funds")) end
-            RemoveMoney(source, amount)
+            if not TryRemoveMoney(source, amount) then return ShowNotification(source, _L("insufficient_funds")) end
             casino.balance = casino.balance + amount
         elseif balanceType == "marked_balance" then
-            if marked_money < amount then return ShowNotification(source, _L("insufficient_funds")) end
-            RemoveMoney(source, amount, "dirty")
+            if not TryRemoveMoney(source, amount, "dirty") then return ShowNotification(source, _L("insufficient_funds")) end
             casino.marked_balance = casino.marked_balance + amount
         end
         ShowNotification(source, _L("casino_deposited", NumberWithCommas(amount), casino.settings.label))

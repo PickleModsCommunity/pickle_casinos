@@ -8,15 +8,15 @@ function DoesRouletteLobbyExist(casinoId, entityId)
 end
 
 function JoinRouletteEntity(source, casinoId, entityId, seatId)
-    local seatId = seatId or 1
     local casino = Casinos[casinoId]
     if not casino then return end
     local entity = GetCasinoEntity(casinoId, entityId)
     if not entity then return end
+    local seatId = SanitizeInt(seatId, 1, #entity.seats) or 1
     if CurrentPlayers[source] then
         for i=1, #entity.seats do
             if entity.seats[i].source == source then
-                entity.seats[seatId].inSeat = true
+                entity.seats[i].inSeat = true
                 debugPrint("PLAYER IS ALREADY IN SEAT", i)
                 return i
             end
@@ -117,11 +117,10 @@ function ProcessRouletteWager(casinoId, entityId, seat)
     local totalWager = GetRouletteTotalWager(entity.seats[seat].connects)
     if totalWager == 0 then return end
     local wager = totalWager
-    if GetCasinoChips(entity.seats[seat].source, casinoId) < wager then
+    if GetCasinoChips(entity.seats[seat].source, casinoId) < wager or not RemoveCasinoChips(entity.seats[seat].source, casinoId, wager) then
         ShowNotification(entity.seats[seat].source, _L("insufficient_chips_bet"))
         return false
     end
-    RemoveCasinoChips(entity.seats[seat].source, casinoId, wager)
     RegisterLuckyTicketWager(entity.seats[seat].source, "roulette", wager)
     return true
 end
@@ -150,13 +149,15 @@ function StartRouletteGame(casinoId, entityId)
         StartRouletteLobby(casinoId, entityId)
         return
     end
-    CreateThread(function()
+    entity.roundPaid = false
+    CreateSafeGameThread("roulette", function()
         local numbers = {"00", "0", "1", "2", "3", "4", "5", "6", "7", "8", "9", "10", "11", "12", "13", "14", "15", "16", "17", "18", "19", "20", "21", "22", "23", "24", "25", "26", "27", "28", "29", "30", "31", "32", "33", "34", "35", "36"}
         entity.stage = {type = "rolling", targetNumber = numbers[math.random(1, 38)]}
         TriggerClientCasinoEvent("pickle_casinos:roulette:updateStage", -1, casinoId, entityId, entity.stage)
         Wait(10000)
         local winningNumber = entity.stage.targetNumber
         local seats = {}
+        entity.roundPaid = true
         for i=1, #entity.seats do 
             local seat = entity.seats[i]
             local connects = seat.connects
@@ -210,6 +211,17 @@ function StartRouletteGame(casinoId, entityId)
             end)
         end
         Wait(1000)
+        StartRouletteLobby(casinoId, entityId)
+    end, function()
+        -- The round crashed: refund stakes if payouts hadn't started, then reopen the table.
+        for i, seat in pairs(entity.seats) do
+            if seat.source and not entity.roundPaid and IsPlayerOnline(seat.source) then
+                local refund = GetRouletteTotalWager(seat.connects)
+                if refund > 0 then AddCasinoChips(seat.source, casinoId, refund) end
+            end
+            seat.connects = GenerateRouletteDefaultWagers()
+        end
+        entity.stage = {type = "waiting", time = 0}
         StartRouletteLobby(casinoId, entityId)
     end)
 end
@@ -365,6 +377,7 @@ RegisterCallback("pickle_casinos:repeatRouletteWager", function(source, cb)
 end)
 
 RegisterCallback("pickle_casinos:roulette:requestSeat", function(source, cb, casinoId, entityId, seatId)
+    if not CanUseCasinoEntity(source, casinoId, entityId, "roulette") then return cb(nil) end
     local seatId = JoinRouletteEntity(source, casinoId, entityId, seatId)
     local entity = GetRouletteEntity(casinoId, entityId)
     if seatId then

@@ -53,18 +53,30 @@ lib.callback.register("pickle_casinos:getJobGrades", function(source, casinoId)
     end, {}, source, casinoId)
 end)
 
+-- True if `grade` is one of the job's defined grade levels (when the bridge can list them).
+function JobGradeExists(jobName, grade)
+    if type(GetJobGrades) ~= "function" then return true end
+    local grades = GetJobGrades(jobName) or {}
+    if #grades == 0 then return true end
+    for _, g in ipairs(grades) do
+        if tonumber(g.level) == grade then return true end
+    end
+    return false
+end
+
 lib.callback.register("pickle_casinos:setEmployeeGrade", function(source, casinoId, targetSource, grade)
     return safe(function(src, cid, tgt, grd)
         if not CanManageCasino(src, cid) then return false, "No access" end
         local jobName = GetCasinoJobName(cid)
         if not jobName or type(SetPlayerJob) ~= "function" then return false, "No job configured" end
         tgt = tonumber(tgt)
-        grd = tonumber(grd)
+        grd = SanitizeInt(grd, 0)
         if not tgt or not grd then return false, "Invalid parameters" end
         if tgt == src then return false, "You can't change your own rank" end
-        if type(GetPlayerJobName) == "function" and GetPlayerJobName(tgt) ~= jobName then
+        if type(GetPlayerJobName) ~= "function" or GetPlayerJobName(tgt) ~= jobName then
             return false, "Target is not an employee"
         end
+        if not JobGradeExists(jobName, grd) then return false, "Invalid grade" end
         SetPlayerJob(tgt, jobName, grd)
         return true
     end, { multi = { false, "Error" } }, source, casinoId, targetSource, grade)
@@ -77,8 +89,10 @@ lib.callback.register("pickle_casinos:fireEmployee", function(source, casinoId, 
         tgt = tonumber(tgt)
         if not tgt then return false, "Invalid target" end
         if tgt == src then return false, "You can't fire yourself" end
+        -- Only job-owned casinos have employees, and only their own staff can be fired.
         local jobName = GetCasinoJobName(cid)
-        if jobName and type(GetPlayerJobName) == "function" and GetPlayerJobName(tgt) ~= jobName then
+        if not jobName then return false, "No job configured" end
+        if type(GetPlayerJobName) ~= "function" or GetPlayerJobName(tgt) ~= jobName then
             return false, "Target is not an employee"
         end
         SetPlayerJob(tgt, "unemployed", 0)
@@ -93,8 +107,19 @@ lib.callback.register("pickle_casinos:hirePlayer", function(source, casinoId, ta
         local jobName = GetCasinoJobName(cid)
         if not jobName or type(SetPlayerJob) ~= "function" then return false, "No job configured" end
         tgt = tonumber(tgt)
-        if not tgt then return false, "Invalid target" end
-        SetPlayerJob(tgt, jobName, 0)
+        if not tgt or tgt == src then return false, "Invalid target" end
+        -- Same rule the hire UI uses: the target must be standing next to the manager.
+        local srcPed = GetPlayerPed(src)
+        if not srcPed or srcPed == 0 or not IsPlayerNearCoords(tgt, GetEntityCoords(srcPed), 10.0) then
+            return false, "Target is not nearby"
+        end
+        if type(GetPlayerJobName) == "function" and GetPlayerJobName(tgt) == jobName then
+            return false, "Target is already an employee"
+        end
+        local lowestGrade = 0
+        local grades = type(GetJobGrades) == "function" and GetJobGrades(jobName) or {}
+        if grades[1] and grades[1].level then lowestGrade = grades[1].level end
+        SetPlayerJob(tgt, jobName, lowestGrade)
         local name = (type(GetPlayerCharacterName) == "function" and GetPlayerCharacterName(tgt)) or ("Player " .. tgt)
         ShowNotification(tgt, "You have been hired!")
         return true, name

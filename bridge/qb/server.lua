@@ -204,10 +204,12 @@ end
 
 function IsPlayerAdmin(source)
     local source = tonumber(source)
-    local permissions = QBCore.Functions.GetPermission(source)
-    for i=1, #Config.AdminGroups do 
-        if QBCore.Functions.HasPermission(source, Config.AdminGroups[i]) or IsPlayerAceAllowed(source, "command") then 
-            return true 
+    if not source or source < 1 then return false end
+    -- Only the configured admin groups count; the generic "command" ACE is
+    -- granted far more widely than casino administration should be.
+    for i=1, #Config.AdminGroups do
+        if QBCore.Functions.HasPermission(source, Config.AdminGroups[i]) or IsPlayerAceAllowed(source, Config.AdminGroups[i]) then
+            return true
         end
     end
     return false

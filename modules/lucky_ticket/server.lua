@@ -12,19 +12,33 @@ local function getItemName()
     return (cfg and cfg.item) or "lucky_ticket"
 end
 
+-- Callbacks waiting on an in-flight DB load, keyed by identifier. Without this,
+-- two wagers before the first load finished would each load (and later save)
+-- their own copy of the row.
+local PendingLoads = {}
+
 local function loadProgress(identifier, cb)
     if LuckyTicketProgress[identifier] then
         cb(LuckyTicketProgress[identifier])
         return
     end
+    if PendingLoads[identifier] then
+        table.insert(PendingLoads[identifier], cb)
+        return
+    end
+    PendingLoads[identifier] = { cb }
     MySQL.Async.fetchAll("SELECT wager_total, tickets_earned FROM `pickle_casino_ticket_progress` WHERE identifier = ?", { identifier }, function(rows)
         local row = rows and rows[1]
-        local entry = {
+        local entry = LuckyTicketProgress[identifier] or {
             wager_total = (row and tonumber(row.wager_total)) or 0,
             tickets_earned = (row and tonumber(row.tickets_earned)) or 0,
         }
         LuckyTicketProgress[identifier] = entry
-        cb(entry)
+        local waiting = PendingLoads[identifier] or {}
+        PendingLoads[identifier] = nil
+        for _, waitingCb in ipairs(waiting) do
+            waitingCb(entry)
+        end
     end)
 end
 
@@ -71,7 +85,7 @@ function ConsumeLuckyTicket(source)
     end
     if (count or 0) < 1 then return false end
     Inventory.RemoveItem(source, itemName, 1)
-    return true
+    return (Inventory.GetItemCount(source, itemName) or 0) < count
 end
 
 function HasLuckyTicket(source)

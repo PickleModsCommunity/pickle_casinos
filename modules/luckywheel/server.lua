@@ -88,34 +88,65 @@ function GenerateWinningSection()
     return section, sectionIndexes[math.random(1, #sectionIndexes)]
 end
 
-RegisterNetEvent("pickle_casinos:luckywheel:startSpin", function()
-    local source = source
-    local casinoId
-    local entityId
+-- Seconds a player has between requestSpin (payment) and startSpin before the
+-- wheel is released and the spin refunded.
+local SPIN_START_TIMEOUT = 30
+
+local function FindPendingSpin(source)
     for k,v in pairs(Casinos) do
         for i=1, #v.entities do
             local entity = v.entities[i]
             if entity.type == "luckywheel" and entity.spinner == source then
-                casinoId = k
-                entityId = entity.id
-                break
+                return k, entity
             end
         end
     end
-    if not casinoId or not entityId then return end
+end
+
+-- Releases a wheel whose spin was paid for but never started.
+local function CancelPendingSpin(casinoId, entity, refund)
+    local pending = entity.pendingSpin
+    entity.pendingSpin = nil
+    entity.spinner = nil
+    entity.sectionIndex = nil
+    entity.stage = {type = "waiting"}
+    TriggerClientCasinoEvent("pickle_casinos:luckywheel:updateStage", -1, casinoId, entity.id, entity.stage)
+    if not pending then return end
+    local casino = Casinos[casinoId]
+    if casino and pending.cooldownIndex and casino.vip_players[pending.cooldownIndex] then
+        casino.vip_players[pending.cooldownIndex].spinStart = pending.previousSpinStart
+        UpdateCasinoPlayerInfo(casinoId)
+    end
+    if refund and IsPlayerOnline(pending.source) then
+        if pending.spinPrice > 0 then AddCasinoChips(pending.source, casinoId, pending.spinPrice) end
+        if pending.usedTicket then Inventory.AddItem(pending.source, Config.LuckyTicket and Config.LuckyTicket.item or "lucky_ticket", 1) end
+    end
+end
+
+AddEventHandler("playerDropped", function()
+    local casinoId, entity = FindPendingSpin(source)
+    if entity and entity.stage and entity.stage.type == "starting" then
+        CancelPendingSpin(casinoId, entity, false)
+    end
+end)
+
+RegisterNetEvent("pickle_casinos:luckywheel:startSpin", function()
+    local source = source
+    local casinoId, entity = FindPendingSpin(source)
+    if not casinoId or not entity then return end
+    local entityId = entity.id
     local casino = Casinos[casinoId]
     if not casino then return end
-    local entity = GetCasinoEntity(casinoId, entityId)
-    if not entity then return end
-    local isSpinning = entity.stage.type ~= "waiting" and entity.stage.type ~= "starting"
-    if not Config.LuckyWheel then print("^1ERROR: LUCKY WHEEL CONFIG UNDEFINED, CHECK LAST UPDATE FOR CONFIG.LUCKYWHEEL AND COPY IT TO YOURS.^0") return cb(false) end
-    if isSpinning then return end
+    if not Config.LuckyWheel then print("^1ERROR: LUCKY WHEEL CONFIG UNDEFINED, CHECK LAST UPDATE FOR CONFIG.LUCKYWHEEL AND COPY IT TO YOURS.^0") return end
+    if entity.stage.type ~= "starting" or not entity.pendingSpin then return end
+    local pending = entity.pendingSpin
+    entity.pendingSpin = nil
     local sectionIndex = entity.sectionIndex
     local sectionCfg = Config.LuckyWheel.sections[LuckyWheelSections[sectionIndex]]
-    if not sectionCfg then print("^1ERROR: LUCKY WHEEL SECTION CONFIG UNDEFINED, ADD THIS SECTION IN CONFIG.LUCKYWHEEL.SECTIONS:^0", LuckyWheelSections[sectionIndex]) return cb(false) end
+    if not sectionCfg then print("^1ERROR: LUCKY WHEEL SECTION CONFIG UNDEFINED, ADD THIS SECTION IN CONFIG.LUCKYWHEEL.SECTIONS:^0", LuckyWheelSections[sectionIndex]) return end
     local result = GetLuckyWheelSafeDegrees(((sectionIndex / #LuckyWheelSections) * 360.0))
     local section = GetLuckyWheelSectionForDegrees(result)
-    local spinPrice = entity.settings.spinPrice or 0
+    local spinPrice = pending.spinPrice
     entity.stage = {type = "spinning", degrees = result}
     TriggerClientCasinoEvent("pickle_casinos:luckywheel:updateStage", -1, casinoId, entityId, entity.stage)
     CreateThread(function()
@@ -127,8 +158,11 @@ RegisterNetEvent("pickle_casinos:luckywheel:startSpin", function()
         SetTimeout(3000, function()
             entity.stage = {type = "waiting"}
             entity.spinner = nil
+            entity.sectionIndex = nil
             TriggerClientCasinoEvent("pickle_casinos:luckywheel:updateStage", -1, casinoId, entityId, entity.stage)
         end)
+        -- Don't pay (or debit the casino) for a player who has left.
+        if not IsPlayerOnline(source) then return end
         if sectionCfg.rewards and #sectionCfg.rewards > 0 then
             local rewards = {}
             if sectionCfg.chooseRandomReward then
@@ -139,22 +173,15 @@ RegisterNetEvent("pickle_casinos:luckywheel:startSpin", function()
             end
             local processed = ProcessLuckyWheelRewards(source, casinoId, entityId, sectionIndex, rewards)
             if not processed then
+                -- The casino couldn't cover the prize: refund the spin and the cooldown.
                 if spinPrice > 0 then
                     AddCasinoChips(source, casinoId, spinPrice)
                 end
-            else
-                -- TODO: spin cooldown
-                local needsCooldown = true
-                if spinPrice > 0 and not Config.LuckyWheel.paidCooldown then
-                    needsCooldown = false
+                if pending.usedTicket then
+                    Inventory.AddItem(source, Config.LuckyTicket and Config.LuckyTicket.item or "lucky_ticket", 1)
                 end
-                if needsCooldown then
-                    local playerInfo, playerIndex = GetPlayerCasinoInfo(source, casinoId)
-                    if not playerIndex then
-                        playerIndex = #casino.vip_players + 1
-                        casino.vip_players[playerIndex] = playerInfo
-                    end
-                    casino.vip_players[playerIndex].spinStart = os.time()
+                if pending.cooldownIndex and casino.vip_players[pending.cooldownIndex] then
+                    casino.vip_players[pending.cooldownIndex].spinStart = pending.previousSpinStart
                     UpdateCasinoPlayerInfo(casinoId)
                 end
             end
@@ -165,12 +192,14 @@ RegisterNetEvent("pickle_casinos:luckywheel:startSpin", function()
 end)
 
 RegisterCallback("pickle_casinos:luckywheel:requestSpin", function(source, cb, casinoId, entityId, seatId)
-    local casino = Casinos[casinoId]
-    if not casino then return end
-    local entity = GetCasinoEntity(casinoId, entityId)
-    if not entity then return end
+    PerformCooldownProcess(source)
+    -- Must be a lucky wheel: this callback rewrites the entity's stage.
+    local canUse, casino, entity = CanUseCasinoEntity(source, casinoId, entityId, "luckywheel")
+    if not canUse then return cb(false) end
+    if FindPendingSpin(source) then return cb(false) end
+    entity.stage = entity.stage or {type = "waiting"}
     local isSpinning = entity.stage.type ~= "waiting"
-    local spinPrice = entity.settings.spinPrice or 0
+    local spinPrice = SanitizeInt(entity.settings.spinPrice, 0) or 0
     local balance = GetCasinoChips(source, casinoId)
     if not Config.LuckyWheel then print("^1ERROR: LUCKY WHEEL CONFIG UNDEFINED, CHECK LAST UPDATE FOR CONFIG.LUCKYWHEEL AND COPY IT TO YOURS.^0") return cb(false) end
     if isSpinning or balance < spinPrice then
@@ -187,33 +216,52 @@ RegisterCallback("pickle_casinos:luckywheel:requestSpin", function(source, cb, c
     local sectionId, sectionIndex = GenerateWinningSection()
     local sectionCfg = Config.LuckyWheel.sections[LuckyWheelSections[sectionIndex]]
     if not sectionCfg then print("^1ERROR: LUCKY WHEEL SECTION CONFIG UNDEFINED, ADD THIS SECTION IN CONFIG.LUCKYWHEEL.SECTIONS:^0", LuckyWheelSections[sectionIndex]) return cb(false) end
-    if (spinPrice > 0 and Config.LuckyWheel.paidCooldown) or (spinPrice == 0) then
-        local playerInfo, playerIndex = GetPlayerCasinoInfo(source, casinoId)
-        if playerInfo.spinStart then
-            local expireTime = playerInfo.spinStart + Config.LuckyWheel.spinCooldown
-            if os.time() < expireTime then
-                local timeLeft = expireTime - os.time()
-                local minutes = math.floor(timeLeft / 60)
-                local seconds = timeLeft % 60
-                ShowNotification(source, _L("luckywheel_spin_cooldown", GetFormattedTime(timeLeft)))
-                return cb(false)
-            end
+    local needsCooldown = (spinPrice > 0 and Config.LuckyWheel.paidCooldown) or (spinPrice == 0)
+    local playerInfo, playerIndex = GetPlayerCasinoInfo(source, casinoId)
+    if not playerInfo or not playerInfo.identifier then return cb(false) end
+    if needsCooldown and playerInfo.spinStart then
+        local expireTime = playerInfo.spinStart + Config.LuckyWheel.spinCooldown
+        if os.time() < expireTime then
+            local timeLeft = expireTime - os.time()
+            ShowNotification(source, _L("luckywheel_spin_cooldown", GetFormattedTime(timeLeft)))
+            return cb(false)
         end
+    end
+    if spinPrice > 0 and not RemoveCasinoChips(source, casinoId, spinPrice) then
+        ShowNotification(source, _L("insufficient_chips"))
+        return cb(false)
     end
     if needsTicket then
         local consumed = ConsumeLuckyTicket and ConsumeLuckyTicket(source) or false
         if not consumed then
+            if spinPrice > 0 then AddCasinoChips(source, casinoId, spinPrice) end
             ShowNotification(source, _L("luckywheel_insufficient_tickets"))
             return cb(false)
         end
         ShowNotification(source, _L("luckywheel_ticket_consumed"))
     end
-    if spinPrice > 0 then
-        RemoveCasinoChips(source, casinoId, spinPrice)
+    -- Start the cooldown when the spin is paid for, not when it finishes, so it
+    -- can't be bypassed by overlapping requests.
+    local pending = { source = source, spinPrice = spinPrice, usedTicket = needsTicket }
+    if needsCooldown then
+        if not playerIndex then
+            playerIndex = #casino.vip_players + 1
+            casino.vip_players[playerIndex] = playerInfo
+        end
+        pending.cooldownIndex = playerIndex
+        pending.previousSpinStart = casino.vip_players[playerIndex].spinStart
+        casino.vip_players[playerIndex].spinStart = os.time()
+        UpdateCasinoPlayerInfo(casinoId)
     end
     entity.spinner = source
     entity.sectionIndex = sectionIndex
+    entity.pendingSpin = pending
     entity.stage = {type = "starting"}
+    SetTimeout(SPIN_START_TIMEOUT * 1000, function()
+        if entity.pendingSpin == pending and entity.stage.type == "starting" then
+            CancelPendingSpin(casinoId, entity, true)
+        end
+    end)
     cb(true)
 end)
 

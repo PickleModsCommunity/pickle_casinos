@@ -7,6 +7,7 @@ Config.UseTarget = true -- This enables the use of the target system when availa
 Config.UseObjectGizmo = false -- This enables the use of object_gizmo for placing objects. If false, it uses the default movement system.
 Config.MaximumChipPurchaseAmount = 1000000 -- Maximum amount of chips a player can purchase at once.
 Config.MaximumItemPurchaseAmount = 100 -- Maximum amount of items a player can purchase at once.
+Config.ExchangeRateLimits = { min = 1, max = 100 } -- Allowed range (percent) for casino owners' chip exchange rates. Keep max at 100 or below so buying chips never gives more chips than the money paid.
 Config.ImageDirectory = "nui://ox_inventory/web/images/" -- (QB: nui://qb-inventory/html/images/) This is the directory where the images are stored. It should be a relative path to the resource folder.
 Config.DisableIPIdentifier = true -- This disables the IP identifier from being sent to the logs.
 Config.DisplayCurrencyAsChips = false -- This shows bet amounts and winnings as a number without any currency - set as false to disable this.

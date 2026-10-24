@@ -21,15 +21,15 @@ function GenerateDefaultPokerSeat(source, casinoId, entityId)
 end
 
 function JoinPokerEntity(source, casinoId, entityId, seatId)
-    local seatId = seatId or 1
     local casino = Casinos[casinoId]
     if not casino then return end
     local entity = GetCasinoEntity(casinoId, entityId)
     if not entity then return end
+    local seatId = SanitizeInt(seatId, 1, #entity.seats) or 1
     if CurrentPlayers[source] then
         for i=1, #entity.seats do
             if entity.seats[i].source == source then
-                entity.seats[seatId].inSeat = true
+                entity.seats[i].inSeat = true
                 return i
             end
         end
@@ -54,9 +54,13 @@ function JoinPokerEntity(source, casinoId, entityId, seatId)
         ShowNotification(source, _L("insufficient_buy_in"))
         return
     end
+    -- The buy-in is escrow, not a wager: lucky-ticket progress is recorded from
+    -- chips actually put into pots at the end of each hand.
+    if not RemoveCasinoChips(source, casinoId, newSeat.balance) then
+        ShowNotification(source, _L("insufficient_buy_in"))
+        return
+    end
     entity.seats[seatId] = newSeat
-    RemoveCasinoChips(source, casinoId, entity.seats[seatId].balance)
-    RegisterLuckyTicketWager(source, "poker", entity.seats[seatId].balance)
     PokerTransactions[source] = StartCasinoGameplayTransaction(source, casinoId, entityId, "poker", entity.seats[seatId].balance)
     CurrentPlayers[source] = {casinoId = casinoId, entityId = entityId, seatId = seatId}
     if not DoesPokerLobbyExist(casinoId, entityId) then
@@ -193,7 +197,7 @@ function StartPokerGame(casinoId, entityId)
         dealerIndex = dealerIndex + 1
         if dealerIndex > #entity.seats then dealerIndex = 1 end
     until entity.seats[dealerIndex].source
-    TriggerClientCasinoEvent("pickle_casinos:poker:updateSeats", -1, casinoId, entityId, entity.seats)
+    TriggerClientCasinoEvent("pickle_casinos:poker:updateSeats", -1, casinoId, entityId, GetObfuscuatedSeats(entity.seats))
     TriggerClientCasinoEvent("pickle_casinos:poker:updatePot", -1, casinoId, entityId, entity.pot)
     local seatOrder = {}
     local currentSeat = bigBlindIndex
@@ -208,7 +212,8 @@ function StartPokerGame(casinoId, entityId)
             currentSeat = #entity.seats
         end
     until currentSeat == bigBlindIndex
-    CreateThread(function()
+    entity.roundPaid = false
+    CreateSafeGameThread("poker", function()
         repeat
             round = round + 1
             for i=1, #seatOrder do
@@ -519,6 +524,7 @@ function StartPokerGame(casinoId, entityId)
         end
 
         -- Apply winnings to seat balances
+        entity.roundPaid = true
         for i=1, #entity.seats do
             if winnings[i] and winnings[i] > 0 then
                 entity.seats[i].balance = entity.seats[i].balance + winnings[i]
@@ -526,12 +532,15 @@ function StartPokerGame(casinoId, entityId)
         end
 
         debugPrint("Round Ended", json.encode(winners), json.encode(results))
+        -- Everyone sees the winners' hands; each seated player additionally sees
+        -- their own. Other (e.g. folded) hands stay hidden.
+        entity.stage = {type = "results", winnings = winnings, seats = GetObfuscuatedSeats(entity.seats, winners)}
+        TriggerClientCasinoEvent("pickle_casinos:poker:updateStage", -1, casinoId, entityId, entity.stage)
         for i=1, #entity.seats do
             if entity.seats[i].source then
                 local seats = GetObfuscuatedSeats(entity.seats, winners)
                 seats[i].cards = entity.seats[i].cards
-                entity.stage = {type = "results", winnings = winnings, seats = seats}
-                TriggerClientCasinoEvent("pickle_casinos:poker:updateStage", -1, casinoId, entityId, entity.stage)
+                TriggerClientCasinoEvent("pickle_casinos:poker:updateStage", entity.seats[i].source, casinoId, entityId, {type = "results", winnings = winnings, seats = seats})
             end
         end
 
@@ -539,35 +548,51 @@ function StartPokerGame(casinoId, entityId)
         entity.pot = 0
         -- Reset seat data
         for i=1, #entity.seats do
-            entity.seats[i].action = nil
-            entity.seats[i].fold = nil
-            entity.seats[i].all = nil
-            entity.seats[i].playing = nil
-            entity.seats[i].blind = "none"
-            entity.seats[i].totalWager = 0
-            entity.seats[i].cards = {}
-            if entity.seats[i].source and entity.seats[i].balance < (entity.settings.bigBlind * 100) then
-                local replenishAmount = (entity.settings.bigBlind * 100) - entity.seats[i].balance
-                local casinoBalance = GetCasinoChips(entity.seats[i].source, casinoId)
-                if casinoBalance >= 0 then
-                    if casinoBalance >= replenishAmount then
-                        RemoveCasinoChips(entity.seats[i].source, casinoId, replenishAmount)
-                        RegisterLuckyTicketWager(entity.seats[i].source, "poker", replenishAmount)
-                        entity.seats[i].balance = entity.seats[i].balance + replenishAmount
-                    else
-                        RemoveCasinoChips(entity.seats[i].source, casinoId, casinoBalance)
-                        RegisterLuckyTicketWager(entity.seats[i].source, "poker", casinoBalance)
-                        entity.seats[i].balance = entity.seats[i].balance + casinoBalance
-                    end
+            local seat = entity.seats[i]
+            if seat.source and (seat.totalWager or 0) > 0 then
+                RegisterLuckyTicketWager(seat.source, "poker", seat.totalWager)
+            end
+            seat.action = nil
+            seat.fold = nil
+            seat.all = nil
+            seat.playing = nil
+            seat.blind = "none"
+            seat.totalWager = 0
+            seat.cards = {}
+            if seat.source and IsPlayerOnline(seat.source) and seat.balance < (entity.settings.bigBlind * 100) then
+                local replenishAmount = (entity.settings.bigBlind * 100) - seat.balance
+                local casinoBalance = GetCasinoChips(seat.source, casinoId)
+                local topUp = math.min(replenishAmount, casinoBalance)
+                if topUp > 0 and RemoveCasinoChips(seat.source, casinoId, topUp) then
+                    seat.balance = seat.balance + topUp
                 end
             end
         end
         entity.dealerCards = {}
         Wait(5000)
-        TriggerClientCasinoEvent("pickle_casinos:poker:updateSeats", -1, casinoId, entityId, entity.seats)
+        TriggerClientCasinoEvent("pickle_casinos:poker:updateSeats", -1, casinoId, entityId, GetObfuscuatedSeats(entity.seats))
         TriggerClientCasinoEvent("pickle_casinos:poker:updateDealerCards", -1, casinoId, entityId, entity.dealerCards)
         TriggerClientCasinoEvent("pickle_casinos:poker:updatePot", -1, casinoId, entityId, entity.pot)
         -- Start a new poker lobby
+        StartPokerLobby(casinoId, entityId)
+    end, function()
+        -- The hand crashed: if the pot wasn't paid out, give each seat back what it put in.
+        for i=1, #entity.seats do
+            local seat = entity.seats[i]
+            if seat.source and not entity.roundPaid then
+                seat.balance = (seat.balance or 0) + (seat.totalWager or 0)
+            end
+            seat.action = nil
+            seat.fold = nil
+            seat.all = nil
+            seat.playing = nil
+            seat.blind = "none"
+            seat.totalWager = 0
+            seat.cards = {}
+        end
+        entity.pot = 0
+        entity.dealerCards = {}
+        TriggerClientCasinoEvent("pickle_casinos:poker:updateSeats", -1, casinoId, entityId, GetObfuscuatedSeats(entity.seats))
         StartPokerLobby(casinoId, entityId)
     end)
 end
@@ -644,6 +669,13 @@ RegisterNetEvent("pickle_casinos:poker:sendPokerAction", function(betType, value
     if not entity.seats[seatId] then return end
     if not entity.seats[seatId].playing then return end
     if entity.stage.type ~= "seatTurn" or entity.stage.seat ~= seatId then return end
+    -- Amounts feed straight into pot/balance arithmetic: whole chips only.
+    if betType == "raise" then
+        value = SanitizeInt(value, 1, entity.seats[seatId].balance)
+        if not value then return end
+    else
+        value = 0
+    end
     if betType == "call" then
         entity.seats[seatId].action = {type = "call", amount = value, wagered = 0}
     elseif betType == "raise" then
@@ -686,6 +718,8 @@ AddEventHandler('playerDropped', function()
 end)
 
 RegisterCallback("pickle_casinos:poker:requestSeat", function(source, cb, casinoId, entityId, seatId)
+    PerformCooldownProcess(source)
+    if not CanUseCasinoEntity(source, casinoId, entityId, "poker") then return cb(nil) end
     local seatId = JoinPokerEntity(source, casinoId, entityId, seatId)
     local entity = GetCasinoEntity(casinoId, entityId)
     if seatId then

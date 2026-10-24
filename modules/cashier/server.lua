@@ -31,13 +31,18 @@ end)
 
 RegisterNetEvent("pickle_casinos:casinoExchange", function(casinoId, entityId, exchangeType, param, param2)
     local source = source
+    PerformCooldownProcess(source)
+    if not CanUseCasinoEntity(source, casinoId, entityId, "cashier") then return end
+    local maxAmount = Config.MaximumChipPurchaseAmount
     if exchangeType == "buy" then
         local currency = param
-        local amount = tonumber(param2)
+        local amount = SanitizeInt(param2, 1, maxAmount)
         if currency ~= "money" and currency ~= "dirty" then return end
-        if not amount or amount <= 0 then return end
+        if not amount then return ShowNotification(source, _L("invalid_amount")) end
         local casino = Casinos[casinoId]
         if not casino then return end
+        if currency == "money" and not casino.settings.cashEnabled then return end
+        if currency == "dirty" and not casino.settings.markedEnabled then return end
         local currencyCash = GetMoney(source, currency)
         if currencyCash < amount then return end
         local exchangeRate = 100
@@ -49,7 +54,7 @@ RegisterNetEvent("pickle_casinos:casinoExchange", function(casinoId, entityId, e
         local multiplier = exchangeRate / 100
         local chips = math.floor(amount * multiplier)
         if chips <= 0 then return end
-        RemoveMoney(source, amount, currency)
+        if not TryRemoveMoney(source, amount, currency) then return ShowNotification(source, _L("insufficient_funds")) end
         ShowNotification(source, _L("cashier_bought_chips", NumberWithCommas(chips, true), NumberWithCommas(amount), currency == "money" and _L("cashier_buy_currency_type_cash") or _L("cashier_buy_currency_type_dirty")))
         ConfigSV.WebhookHandler("purchaseChips", {
             casinoId = casinoId,
@@ -75,15 +80,19 @@ RegisterNetEvent("pickle_casinos:casinoExchange", function(casinoId, entityId, e
         AddCasinoTransaction(source, casinoId, "deposit", amount)
         Inventory.AddItem(source, casino.settings.chipItem, chips)
     elseif exchangeType == "sell" then
-        local amount = tonumber(param2)
-        if not amount or amount <= 0 then return end
+        local amount = SanitizeInt(param2, 1, maxAmount)
+        if not amount then return ShowNotification(source, _L("invalid_amount")) end
         local casino = Casinos[casinoId]
         if not casino then return end
         local chips = Inventory.GetItemCount(source, casino.settings.chipItem) or 0
         if chips < amount then return end
         local casinoBalance = casino.balance or 0
-        if IsCasinoOwned(casinoId) then 
-            if amount > casinoBalance then return end
+        if IsCasinoOwned(casinoId) and amount > casinoBalance then return end
+        -- Take the chips first; only pay out if they were actually removed.
+        Inventory.RemoveItem(source, casino.settings.chipItem, amount)
+        local remaining = Inventory.GetItemCount(source, casino.settings.chipItem) or 0
+        if (chips - remaining) < amount then return end
+        if IsCasinoOwned(casinoId) then
             casino.balance = casinoBalance - amount
             MySQL.Async.execute('UPDATE `pickle_casinos` SET balance = ?, marked_balance = ? WHERE id = ?', {
                 casino.balance,
@@ -92,7 +101,6 @@ RegisterNetEvent("pickle_casinos:casinoExchange", function(casinoId, entityId, e
             })
             TriggerClientEvent("pickle_casinos:updateCasinoBalance", -1, casinoId, casino.balance, casino.marked_balance)
         end
-        Inventory.RemoveItem(source, casino.settings.chipItem, amount)
         AddMoney(source, amount, "money")
         ShowNotification(source, _L("cashier_sold_chips", NumberWithCommas(amount, true), NumberWithCommas(amount), _L("cashier_buy_currency_type_cash")))
         ConfigSV.WebhookHandler("sellChips", {
@@ -110,21 +118,21 @@ end)
 
 RegisterNetEvent("pickle_casinos:purchaseVIP", function(casinoId, entityId)
     local source = source
+    PerformCooldownProcess(source)
+    if not CanUseCasinoEntity(source, casinoId, entityId, "cashier") then return end
     local identifier = GetIdentifier(source)
+    if not identifier then return end
     local casino = Casinos[casinoId]
     if not casino then return end
-    local vipPrice = math.max(0, tonumber(casino.settings.vipPrice) or 0)
+    local vipPrice = SanitizeInt(casino.settings.vipPrice, 0) or 0
     local isFree = vipPrice <= 0
-    if not isFree then
-        local money = GetMoney(source)
-        if money < vipPrice then
-            ShowNotification(source, _L("insufficient_funds"))
-            return
-        end
-    end
     local playerInfo, playerIndex = GetPlayerCasinoInfo(source, casinoId)
-    if playerInfo.startTime then
+    if IsPlayerCasinoVIP(source, casinoId) then
         ShowNotification(source, _L("cashier_vip_already_owned"))
+        return
+    end
+    if not isFree and not TryRemoveMoney(source, vipPrice) then
+        ShowNotification(source, _L("insufficient_funds"))
         return
     end
     if playerIndex then
@@ -136,7 +144,6 @@ RegisterNetEvent("pickle_casinos:purchaseVIP", function(casinoId, entityId)
         ShowNotification(source, _L("cashier_vip_bought_free"))
     else
         ShowNotification(source, _L("cashier_vip_bought", NumberWithCommas(vipPrice)))
-        RemoveMoney(source, vipPrice)
     end
     MySQL.Async.execute('UPDATE `pickle_casinos` SET vip_players = ? WHERE id = ?', {
         json.encode(casino.vip_players),
