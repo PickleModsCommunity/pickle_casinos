@@ -53,7 +53,7 @@ function ProcessLuckyWheelRewards(source, casinoId, entityId, section, rewards)
         -- A failed vehicle insert does not charge the casino or announce a win.
         casino.balance = casino.balance + totalCost - spent
         MySQL.Async.execute('UPDATE `pickle_casinos` SET balance = ? WHERE id = ?', { casino.balance, casinoId })
-        TriggerClientEvent("pickle_casinos:updateCasinoBalance", -1, casinoId, casino.balance, casino.marked_balance or 0)
+        TriggerCasinoStateEvent("pickle_casinos:updateCasinoBalance", casinoId, casino.balance, casino.marked_balance or 0)
         if spent > 0 then AddCasinoTransaction(source, casinoId, "luckywheel_withdraw", spent) end
     end
     if #delivered == 0 then return false end

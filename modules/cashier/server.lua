@@ -94,7 +94,7 @@ ProcessCasinoExchange = function(source, casinoId, entityId, exchangeType, param
                 casino.marked_balance,
                 casinoId
             })
-            TriggerClientEvent("pickle_casinos:updateCasinoBalance", -1, casinoId, casino.balance, casino.marked_balance)
+            TriggerCasinoStateEvent("pickle_casinos:updateCasinoBalance", casinoId, casino.balance, casino.marked_balance)
         end
         AddCasinoTransaction(source, casinoId, "deposit", amount)
     elseif exchangeType == "sell" then
@@ -115,7 +115,7 @@ ProcessCasinoExchange = function(source, casinoId, entityId, exchangeType, param
                 casino.marked_balance,
                 casinoId
             })
-            TriggerClientEvent("pickle_casinos:updateCasinoBalance", -1, casinoId, casino.balance, casino.marked_balance)
+            TriggerCasinoStateEvent("pickle_casinos:updateCasinoBalance", casinoId, casino.balance, casino.marked_balance)
         end
         AddMoney(source, amount, "money")
         ShowNotification(source, _L("cashier_sold_chips", NumberWithCommas(amount, true), NumberWithCommas(amount), _L("cashier_buy_currency_type_cash")))
@@ -179,7 +179,7 @@ ProcessVIPPurchase = function(source, casinoId, entityId)
             casino.balance,
             casinoId
         })
-        TriggerClientEvent("pickle_casinos:updateCasinoBalance", -1, casinoId, casino.balance, casino.marked_balance)
+        TriggerCasinoStateEvent("pickle_casinos:updateCasinoBalance", casinoId, casino.balance, casino.marked_balance)
     end
     if not isFree then
         -- Free VIP doesn't represent a cash movement, so skip the log to

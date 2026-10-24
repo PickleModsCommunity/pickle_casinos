@@ -37,7 +37,7 @@ local function ProcessStorePurchase(source, casinoId, entityId, itemIndex, amoun
             casino.balance,
             casinoId
         })
-        TriggerClientEvent("pickle_casinos:updateCasinoBalance", -1, casinoId, casino.balance, casino.marked_balance)
+        TriggerCasinoStateEvent("pickle_casinos:updateCasinoBalance", casinoId, casino.balance, casino.marked_balance)
     end
 end
 

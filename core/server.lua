@@ -47,9 +47,12 @@ end
 function TriggerClientCasinoEvent(eventName, target, casinoId, entityId, ...)
     local casinoEntity = GetCasinoEntity(casinoId, entityId)
     if not casinoEntity then return end
-    local coords = casinoEntity.settings.location.coords
-    -- HANDLE GRID COORDS HERE IF SUPER COOL AND AWESOME
-    TriggerClientEvent(eventName, target, casinoId, entityId, ...)
+    if target ~= -1 or Config.PerformanceMode == false then
+        return TriggerClientEvent(eventName, target, casinoId, entityId, ...)
+    end
+    for src in pairs(GetCasinoEntityRecipients(casinoId, entityId)) do
+        TriggerClientEvent(eventName, src, casinoId, entityId, ...)
+    end
 end
 
 local GameplayTransactionCounter = 0

@@ -4,7 +4,7 @@ local handlers, callbacks, net, timeouts, pushes = {}, {}, {}, {}, {}
 local character, inventoryFull, inventoryCount = "character-A", false, 0
 local rows, nextId, notifications = {}, 0, 0
 local afterQuery, afterDelete, deferredLoad
-Config = { LuckyTicket = { enabled = true, chipsPerTicket = 100, eligibleGames = { slots = true } },
+Config = { PerformanceMode = false, LuckyTicket = { enabled = true, chipsPerTicket = 100, eligibleGames = { slots = true } },
     LuckyWheel = { sections = { car = {} } }, ExchangeRateLimits = { min = 1, max = 100 } }
 PERSONAL_CASINOS_LABEL = "__PERSONAL__"
 Casinos = { [1] = { settings = { label = "Casino", chipItem = "chips" }, balance = 1000,
@@ -63,6 +63,7 @@ MySQL = {
     Async = { execute = function() end, fetchAll = function(_, _, cb) deferredLoad = cb end },
 }
 dofile("core/server.lua")
+dofile("core/proximity_server.lua")
 dofile("modules/casino/server.lua")
 dofile("modules/poker/server.lua")
 dofile("modules/lucky_ticket/server.lua")

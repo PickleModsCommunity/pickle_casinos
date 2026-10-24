@@ -1046,23 +1046,36 @@ RegisterNetEvent("pickle_casinos:exitManagement", function(casinoId)
 end)
 
 local LastInitialize = {}
+local AwaitingProximityReady = {}
 
 AddEventHandler("pickle_casinos:playerUnloaded", function(source)
     LastInitialize[source] = nil
+    AwaitingProximityReady[source] = nil
+end)
+
+RegisterNetEvent("pickle_casinos:readyForNearbyUpdates", function()
+    local src = source
+    local session = AwaitingProximityReady[src]
+    if not session or not IsCasinoPlayerSession(src, session) then return end
+    AwaitingProximityReady[src] = nil
+    RegisterCasinoProximityPlayer(src)
 end)
 
 RegisterNetEvent("pickle_casinos:initializePlayer", function()
     local source = source
     local now = os.time()
     if LastInitialize[source] and (now - LastInitialize[source]) < 10 then return end
+    RememberPlayerIdentifier(source)
     LastInitialize[source] = now
+    if Config.PerformanceMode ~= false then
+        AwaitingProximityReady[source] = GetCasinoPlayerSession(source)
+    end
     TriggerClientEvent("pickle_casinos:syncCasinos", source, GetPublicCasinos(), GetIdentifier(source))
     TriggerClientEvent("pickle_casinos:setupInventory", source, {
         items = Inventory.Items,
     })
     UpdateHorseTracks(source)
     UpdateObjects(source)
-    RememberPlayerIdentifier(source)
     PayPendingRefunds(source)
 end)
 
@@ -1313,7 +1326,7 @@ local function ProcessCasinoTransfer(source, casinoId, transferInfo)
         casino.marked_balance,
         casinoId
     })
-    TriggerClientEvent("pickle_casinos:updateCasinoBalance", -1, casinoId, casino.balance, casino.marked_balance)
+    TriggerCasinoStateEvent("pickle_casinos:updateCasinoBalance", casinoId, casino.balance, casino.marked_balance)
 end
 
 RegisterNetEvent("pickle_casinos:startCasinoTransfer", function(casinoId, transferInfo)

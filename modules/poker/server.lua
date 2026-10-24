@@ -107,10 +107,16 @@ function GetPlayerPokerInfo(source)
     end
 end
 
-function TriggerReclusiveClientEvent(eventName, source, ...)
-    for _, playerId in ipairs(GetPlayers()) do
-        if tonumber(source) ~= tonumber(playerId) then
-            TriggerClientEvent(eventName, playerId, ...)
+function TriggerReclusiveClientEvent(eventName, source, casinoId, entityId, ...)
+    local recipients = {}
+    if Config.PerformanceMode == false then
+        for _, playerId in ipairs(GetPlayers()) do recipients[tonumber(playerId)] = true end
+    else
+        recipients = GetCasinoEntityRecipients(casinoId, entityId)
+    end
+    for playerId in pairs(recipients) do
+        if tonumber(source) ~= playerId then
+            TriggerClientEvent(eventName, playerId, casinoId, entityId, ...)
         end
     end
 end
