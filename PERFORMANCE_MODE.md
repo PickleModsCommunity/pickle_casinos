@@ -20,4 +20,4 @@ Initial casino definitions and infrequent structural changes (blips, layout, own
 
 Set `Config.PerformanceMode = false` and restart the resource to restore the previous delivery behavior. Restart after changing the radius or refresh interval as well.
 
-Validation: `lua tests/performance_regression.lua` checks routing, boundaries, teleports, re-entry snapshots, private-card handling, management subscriptions, client readiness, cleanup and legacy mode. The tests use FiveM/framework stubs; live server load and bandwidth measurements have not been performed.
+Live server load and bandwidth measurements have not been performed.

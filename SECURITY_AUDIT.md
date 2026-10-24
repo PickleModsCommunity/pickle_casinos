@@ -259,7 +259,7 @@ Use a headless harness that mocks `source`, the bridge (`GetMoney`, `AddMoney`, 
 
 ## Fix status (branch `security-audit-ticker-24102026`)
 
-The follow-up includes automated security and framework regression tests (details below). These changes have **not** been run on a FiveM server yet, so test each game before merging.
+These changes have **not** been run on a FiveM server yet, so test each game before merging.
 
 | # | Area | Status |
 |---|---|---|
@@ -291,7 +291,7 @@ New config keys: `Config.ExchangeRateLimits`, `Config.FrameworkSettings.cashItem
 - Both vehicle bridges check existing plates, reserve in-flight plates, retry insert conflicts, and capture the original owner before SQL waits. The duplicate ESX vehicle function is removed. Failed vehicle rewards do not charge the casino or announce a successful award; partial reward bundles only charge delivered rewards.
 - Dirty-money exchange limits and defaults are unchanged.
 
-Validation: `lua tests/security_regression.lua` (50 checks) and `lua tests/bridge_regression.lua` (10 checks) pass under Lua 5.4 through Lupa. Server/test files also pass Lua 5.4 compilation with the QB bridge's pre-existing `?.` extension normalized only in the validation input. The bridge regression harness applies the same normalization for stock Lua. No production syntax was rewritten for this compatibility step.
+Validation: Lua 5.4 compilation passed with the QB bridge's pre-existing `?.` extension normalized only in the validation input. No production syntax was rewritten for this compatibility step.
 
 These tests use framework, inventory, and SQL stubs. A live FiveM server and real framework/database integrations remain to be tested before merging, especially inventory-full payouts, character switching during games, and vehicle awards on each supported framework.
 
@@ -302,4 +302,4 @@ These tests use framework, inventory, and SQL stubs. A live FiveM server and rea
 
 `Config.CasinoSyncDistance` defaults to 150 metres (at least render distance + 25), and `Config.PerformanceUpdateInterval` defaults to 1000 ms. A shared spatial index reads each player's position once per refresh; live events recheck candidate positions. Arriving players receive current state after initial client setup has been acknowledged. Poker snapshots preserve only the recipient's own private hand. Subscriptions are cleared on character unload.
 
-See `PERFORMANCE_MODE.md` for configuration and delivery details. Validation now includes 31 performance-mode checks alongside the existing 60 security/framework checks. No live FiveM load or bandwidth benchmark has been run.
+See `PERFORMANCE_MODE.md` for configuration and delivery details. No live FiveM load or bandwidth benchmark has been run.
