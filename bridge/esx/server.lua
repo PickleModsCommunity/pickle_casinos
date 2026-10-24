@@ -67,11 +67,49 @@ function CheckPermission(source, permission)
     end
 end
 
+-- Cash/black money can be stored two ways: as an inventory item (ox_inventory
+-- does this for the accounts in its "inventory:accounts" convar) or as a
+-- plain ESX account. When it's an item, the item is the source of truth and
+-- ESX's account value is only a synced copy, so we read and remove the item.
+local function UsingOxInventory()
+    return GetResourceState("ox_inventory") == "started"
+end
+
+-- Same rule ESX and ox_inventory use: the accounts listed in the
+-- inventory:accounts convar (default ["money"]), plus black_money, which the
+-- ESX integration always stores as an item.
+local function IsOxAccountItem(accountName)
+    if not UsingOxInventory() then return false end
+    if accountName == "black_money" then return true end
+    local ok, list = pcall(json.decode, GetConvar("inventory:accounts", '["money"]'))
+    if not ok or type(list) ~= "table" then return accountName == "money" end
+    for _, name in ipairs(list) do
+        if name == accountName then return true end
+    end
+    return false
+end
+
+-- Returns the item that holds this currency, or nil if it's an ESX account.
+-- Config.FrameworkSettings.cashItem can force cash either way.
+local function GetCurrencyItem(currency)
+    local account = (currency == "dirty") and "black_money" or "money"
+    if currency ~= "dirty" then
+        local setting = Config.FrameworkSettings and Config.FrameworkSettings.cashItem
+        if setting == false then return nil end
+        if type(setting) == "string" and setting ~= "" and setting ~= "auto" then return setting end
+    end
+    if IsOxAccountItem(account) then return account end
+    return nil
+end
+
 function AddMoney(source, count, currency)
     local xPlayer = ESX.GetPlayerFromId(source)
     if not xPlayer then return end
     local currency = currency or "money"
-    if (currency == "money") then
+    local item = GetCurrencyItem(currency)
+    if item then
+        Inventory.AddItem(source, item, count)
+    elseif (currency == "money") then
         xPlayer.addMoney(count)
     elseif (currency == "dirty") then
         xPlayer.addAccountMoney("black_money", count)
@@ -79,27 +117,25 @@ function AddMoney(source, count, currency)
     TriggerClientEvent("pickle_casinos:updateMoney", source, GetMoney(source, currency))
 end
 
--- With ox_inventory, cash and black money are inventory items, and the item is
--- the source of truth. ESX's account value is only a synced copy.
-local function UsingOxInventory()
-    return GetResourceState("ox_inventory") == "started"
-end
-
-local function GetAccountItemName(currency)
-    return (currency == "dirty") and "black_money" or "money"
-end
-
--- Removes money and returns true only if it was really taken. With
--- ox_inventory this is a single check-and-remove on the item itself, so a
--- stale ESX balance can't make a failed removal look successful.
+-- Removes money and returns true only if it was really taken. For item-based
+-- cash this is one check-and-remove on the item, so a stale ESX balance can't
+-- make a failed removal look successful.
 function RemoveMoney(source, count, currency)
     local xPlayer = ESX.GetPlayerFromId(source)
     if not xPlayer then return false end
     local currency = currency or "money"
     if currency ~= "money" and currency ~= "dirty" then return false end
     local success
-    if UsingOxInventory() then
-        success = exports.ox_inventory:RemoveItem(source, GetAccountItemName(currency), count) == true
+    local item = GetCurrencyItem(currency)
+    if item then
+        local before = Inventory.GetItemCount(source, item) or 0
+        local result = Inventory.RemoveItem(source, item, count)
+        if result == nil then
+            -- A custom inventory returned nothing; confirm the count dropped.
+            success = (before - (Inventory.GetItemCount(source, item) or 0)) >= count
+        else
+            success = result == true
+        end
     else
         local before = GetMoney(source, currency)
         local result
@@ -124,8 +160,9 @@ function GetMoney(source, currency)
     if not xPlayer then return 0 end
     local currency = currency or "money"
     local money = 0
-    if UsingOxInventory() then
-        money = exports.ox_inventory:GetItemCount(source, GetAccountItemName(currency)) or 0
+    local item = GetCurrencyItem(currency)
+    if item then
+        money = Inventory.GetItemCount(source, item) or 0
     elseif (currency == "money") then
         money = xPlayer.getMoney()
     elseif (currency == "dirty") then

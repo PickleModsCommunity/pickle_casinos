@@ -64,10 +64,28 @@ function CheckPermission(source, permission)
     end
 end
 
--- With ox_inventory, cash is the "money" item and the item is the source of
--- truth (the framework's cash value is a synced copy).
+-- Cash can be stored two ways: as an inventory item (ox_inventory does this
+-- for the accounts in its "inventory:accounts" convar) or as the player's
+-- QB cash balance. When it's an item, the item is the source of truth and the
+-- cash balance is only a synced copy, so we read and remove the item.
 local function UsingOxInventory()
     return GetResourceState("ox_inventory") == "started"
+end
+
+-- Returns the item that holds cash, or nil if cash is the QB cash balance.
+-- Config.FrameworkSettings.cashItem can force it either way.
+local function GetCashItem()
+    local setting = Config.FrameworkSettings and Config.FrameworkSettings.cashItem
+    if setting == false then return nil end
+    if type(setting) == "string" and setting ~= "" and setting ~= "auto" then return setting end
+    if not UsingOxInventory() then return nil end
+    -- Same rule ox_inventory uses: accounts in inventory:accounts (default ["money"]).
+    local ok, list = pcall(json.decode, GetConvar("inventory:accounts", '["money"]'))
+    if not ok or type(list) ~= "table" then return "money" end
+    for _, name in ipairs(list) do
+        if name == "money" then return "money" end
+    end
+    return nil
 end
 
 local function GetDirtyMoneyItem()
@@ -75,12 +93,28 @@ local function GetDirtyMoneyItem()
     return setting == "DEFAULT" and 'dirty_money' or setting
 end
 
+-- Removes an item through the bridge and returns true only if it was taken,
+-- confirming by count when a custom inventory returns nothing.
+local function RemoveItemConfirmed(source, item, count)
+    local before = Inventory.GetItemCount(source, item) or 0
+    local result = Inventory.RemoveItem(source, item, count)
+    if result == nil then
+        return (before - (Inventory.GetItemCount(source, item) or 0)) >= count
+    end
+    return result == true
+end
+
 function AddMoney(source, count, currency)
     local xPlayer = QBCore.Functions.GetPlayer(tonumber(source))
     if not xPlayer then return end
     local currency = currency or "money"
     if (currency == "money") then
-        xPlayer.Functions.AddMoney('cash', count)
+        local cashItem = GetCashItem()
+        if cashItem then
+            Inventory.AddItem(source, cashItem, count)
+        else
+            xPlayer.Functions.AddMoney('cash', count)
+        end
     elseif (currency == "dirty") then
         Inventory.AddItem(source, GetDirtyMoneyItem(), count)
     end
@@ -94,8 +128,9 @@ function RemoveMoney(source, count, currency)
     local currency = currency or "money"
     local success = false
     if (currency == "money") then
-        if UsingOxInventory() then
-            success = exports.ox_inventory:RemoveItem(source, 'money', count) == true
+        local cashItem = GetCashItem()
+        if cashItem then
+            success = RemoveItemConfirmed(source, cashItem, count)
         else
             local before = xPlayer.PlayerData.money.cash or 0
             local result = xPlayer.Functions.RemoveMoney('cash', count)
@@ -106,7 +141,7 @@ function RemoveMoney(source, count, currency)
             end
         end
     elseif (currency == "dirty") then
-        success = Inventory.RemoveItem(source, GetDirtyMoneyItem(), count) == true
+        success = RemoveItemConfirmed(source, GetDirtyMoneyItem(), count)
     end
     TriggerClientEvent("pickle_casinos:updateMoney", source, GetMoney(source, currency))
     return success
@@ -118,8 +153,9 @@ function GetMoney(source, currency)
     local currency = currency or "money"
     local money = 0
     if (currency == "money") then
-        if UsingOxInventory() then
-            money = exports.ox_inventory:GetItemCount(source, 'money') or 0
+        local cashItem = GetCashItem()
+        if cashItem then
+            money = Inventory.GetItemCount(source, cashItem) or 0
         else
             money = xPlayer.PlayerData.money.cash or 0
         end

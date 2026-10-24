@@ -161,6 +161,11 @@ Config.FrameworkSettings = {
     -- Note to framework creators: stop breaking your frameworks by moving / removing stuff in big 2025, if it continues I'm making pickle core
     society = "qb-management", -- This is the society that the casinos will use to pay taxes. (qb-management or qb-banking, if using ESX don't worry it's automatic)
     dirtyMoney = "DEFAULT", -- DEFAULT / item name (black_money, marked_bills, etc).
+    -- How cash is stored on your server:
+    --   "auto"  = detect it: with ox_inventory, cash is an item when "money" is in the inventory:accounts convar (ox_inventory's default); otherwise it's a framework account.
+    --   false   = cash is always a framework account (player money / cash balance), never an item.
+    --   "money" (or another item name) = your inventory stores cash as this item.
+    cashItem = "auto",
 }
 
 Config.Casinos = {
