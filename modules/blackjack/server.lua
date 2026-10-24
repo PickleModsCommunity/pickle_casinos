@@ -402,9 +402,9 @@ function StartBlackjackGame(casinoId, entityId)
     end, function()
         -- The round crashed: refund stakes if payouts hadn't started, then reopen the table.
         for k, seat in pairs(entity.seats) do
-            if k ~= 0 and seat.source and not entity.roundPaid and IsPlayerOnline(seat.source) then
+            if k ~= 0 and seat.source and not entity.roundPaid then
                 local refund = (seat.wagers[1] or 0) + (seat.wagers[2] or 0)
-                if refund > 0 then AddCasinoChips(seat.source, casinoId, refund) end
+                RefundCasinoChips(seat.source, casinoId, refund)
             end
             seat.hands = {{}, {}}
             seat.wagers = {0, 0}

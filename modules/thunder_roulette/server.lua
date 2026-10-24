@@ -256,9 +256,9 @@ function StartThunderRouletteGame(casinoId, entityId)
     end, function()
         -- The round crashed: refund stakes if payouts hadn't started, then reopen the table.
         for i, seat in pairs(entity.seats) do
-            if seat.source and not entity.roundPaid and IsPlayerOnline(seat.source) then
+            if seat.source and not entity.roundPaid then
                 local refund = GetThunderRouletteTotalWager(seat.connects)
-                if refund > 0 then AddCasinoChips(seat.source, casinoId, refund) end
+                RefundCasinoChips(seat.source, casinoId, refund)
             end
             seat.connects = GenerateThunderRouletteDefaultWagers()
         end

@@ -103,8 +103,13 @@ local function FindPendingSpin(source)
     end
 end
 
--- Releases a wheel whose spin was paid for but never started.
-local function CancelPendingSpin(casinoId, entity, refund)
+local function GetLuckyTicketItem()
+    return Config.LuckyTicket and Config.LuckyTicket.item or "lucky_ticket"
+end
+
+-- Releases a wheel whose spin was paid for but never started, refunding the
+-- spin (stored for later if the player has disconnected).
+local function CancelPendingSpin(casinoId, entity, dropped)
     local pending = entity.pendingSpin
     entity.pendingSpin = nil
     entity.spinner = nil
@@ -117,16 +122,14 @@ local function CancelPendingSpin(casinoId, entity, refund)
         casino.vip_players[pending.cooldownIndex].spinStart = pending.previousSpinStart
         UpdateCasinoPlayerInfo(casinoId)
     end
-    if refund and IsPlayerOnline(pending.source) then
-        if pending.spinPrice > 0 then AddCasinoChips(pending.source, casinoId, pending.spinPrice) end
-        if pending.usedTicket then Inventory.AddItem(pending.source, Config.LuckyTicket and Config.LuckyTicket.item or "lucky_ticket", 1) end
-    end
+    if pending.spinPrice > 0 then RefundCasinoChips(pending.source, casinoId, pending.spinPrice, dropped) end
+    if pending.usedTicket then RefundCasinoItem(pending.source, GetLuckyTicketItem(), 1, dropped) end
 end
 
 AddEventHandler("playerDropped", function()
     local casinoId, entity = FindPendingSpin(source)
     if entity and entity.stage and entity.stage.type == "starting" then
-        CancelPendingSpin(casinoId, entity, false)
+        CancelPendingSpin(casinoId, entity, true)
     end
 end)
 
@@ -161,8 +164,17 @@ RegisterNetEvent("pickle_casinos:luckywheel:startSpin", function()
             entity.sectionIndex = nil
             TriggerClientCasinoEvent("pickle_casinos:luckywheel:updateStage", -1, casinoId, entityId, entity.stage)
         end)
-        -- Don't pay (or debit the casino) for a player who has left.
-        if not IsPlayerOnline(source) then return end
+        -- The player left mid-spin: don't pay (or debit the casino); store a
+        -- refund of what they paid instead, and give the cooldown back.
+        if not IsPlayerOnline(source) then
+            if spinPrice > 0 then RefundCasinoChips(source, casinoId, spinPrice, true) end
+            if pending.usedTicket then RefundCasinoItem(source, GetLuckyTicketItem(), 1, true) end
+            if pending.cooldownIndex and casino.vip_players[pending.cooldownIndex] then
+                casino.vip_players[pending.cooldownIndex].spinStart = pending.previousSpinStart
+                UpdateCasinoPlayerInfo(casinoId)
+            end
+            return
+        end
         if sectionCfg.rewards and #sectionCfg.rewards > 0 then
             local rewards = {}
             if sectionCfg.chooseRandomReward then
@@ -175,10 +187,10 @@ RegisterNetEvent("pickle_casinos:luckywheel:startSpin", function()
             if not processed then
                 -- The casino couldn't cover the prize: refund the spin and the cooldown.
                 if spinPrice > 0 then
-                    AddCasinoChips(source, casinoId, spinPrice)
+                    RefundCasinoChips(source, casinoId, spinPrice)
                 end
                 if pending.usedTicket then
-                    Inventory.AddItem(source, Config.LuckyTicket and Config.LuckyTicket.item or "lucky_ticket", 1)
+                    RefundCasinoItem(source, GetLuckyTicketItem(), 1)
                 end
                 if pending.cooldownIndex and casino.vip_players[pending.cooldownIndex] then
                     casino.vip_players[pending.cooldownIndex].spinStart = pending.previousSpinStart
@@ -259,7 +271,7 @@ RegisterCallback("pickle_casinos:luckywheel:requestSpin", function(source, cb, c
     entity.stage = {type = "starting"}
     SetTimeout(SPIN_START_TIMEOUT * 1000, function()
         if entity.pendingSpin == pending and entity.stage.type == "starting" then
-            CancelPendingSpin(casinoId, entity, true)
+            CancelPendingSpin(casinoId, entity, false)
         end
     end)
     cb(true)

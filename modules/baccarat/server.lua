@@ -49,7 +49,7 @@ function JoinBaccaratEntity(source, casinoId, entityId, seatId)
     return seatId
 end
 
-function LeaveBaccaratEntity(source, casinoId, entityId, seatId)
+function LeaveBaccaratEntity(source, casinoId, entityId, seatId, dropped)
     local casino = Casinos[casinoId]
     if not casino then return end
     local entity = GetCasinoEntity(casinoId, entityId)
@@ -59,7 +59,7 @@ function LeaveBaccaratEntity(source, casinoId, entityId, seatId)
         if entity.stage and entity.stage.type == "waiting" then
             local refund = GetBaccaratTotalWager(entity.seats[seatId].wagers)
             if refund and refund > 0 then
-                AddCasinoChips(source, casinoId, refund)
+                RefundCasinoChips(source, casinoId, refund, dropped)
             end
         end
         entity.seats[seatId] = GenerateDefaultBaccaratSeat()
@@ -296,9 +296,9 @@ function StartBaccaratGame(casinoId, entityId)
     end, function()
         -- The round crashed: refund stakes if payouts hadn't started, then reopen the table.
         for k, seat in pairs(entity.seats) do
-            if not entity.roundPaid and seat.source and IsPlayerOnline(seat.source) then
+            if not entity.roundPaid and seat.source then
                 local refund = GetBaccaratTotalWager(seat.wagers or {})
-                if refund > 0 then AddCasinoChips(seat.source, casinoId, refund) end
+                RefundCasinoChips(seat.source, casinoId, refund)
             end
             seat.wagers = GenerateBaccaratDefaultWagers()
         end
@@ -539,7 +539,7 @@ AddEventHandler('playerDropped', function()
     local source = source
     local info = GetPlayerBaccaratInfo(source)
     if info then
-        LeaveBaccaratEntity(source, info.casinoId, info.entityId, info.seatId)
+        LeaveBaccaratEntity(source, info.casinoId, info.entityId, info.seatId, true)
     end
     if CurrentPlayers[source] then
         CurrentPlayers[source] = nil

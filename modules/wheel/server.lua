@@ -125,10 +125,10 @@ function StartWheelGame(casinoId, entityId)
     end, function()
         -- The round crashed: refund charged stakes if payouts hadn't started, then reopen the wheel.
         for k, v in pairs(entity.players) do
-            if not entity.roundPaid and charged[k] and IsPlayerOnline(k) then
+            if not entity.roundPaid and charged[k] then
                 local refund = 0
                 for _, b in pairs(v.wagers) do refund = refund + b end
-                if refund > 0 then AddCasinoChips(k, casinoId, refund) end
+                RefundCasinoChips(k, casinoId, refund)
             end
             v.wagers = GenerateDefaultWheelWagers()
         end

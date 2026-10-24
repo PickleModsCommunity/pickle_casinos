@@ -577,6 +577,157 @@ function TryRemoveMoney(source, amount, currency)
     return (before - after) >= amount
 end
 
+-- Identifiers of players who have interacted with the casino, kept briefly
+-- after they drop so disconnect handlers can still credit them.
+local KnownIdentifiers = {}
+
+function RememberPlayerIdentifier(source)
+    local identifier = GetIdentifier(source)
+    if identifier then KnownIdentifiers[source] = identifier end
+    return identifier
+end
+
+function GetKnownIdentifier(source)
+    return GetIdentifier(source) or KnownIdentifiers[source]
+end
+
+AddEventHandler("playerDropped", function()
+    local src = source
+    -- Other playerDropped handlers may still need it; forget it shortly after.
+    SetTimeout(10000, function() KnownIdentifiers[src] = nil end)
+end)
+
+local function QueuePendingRefund(source, casinoId, item, amount)
+    local identifier = GetKnownIdentifier(source)
+    if not identifier then
+        print(("^1[pickle_casinos] Could not store a refund of %s for player %s: identifier unknown.^0"):format(tostring(amount), tostring(source)))
+        return
+    end
+    MySQL.insert("INSERT INTO `pickle_casino_pending_refunds` (`identifier`, `casino_id`, `item`, `amount`) VALUES (?, ?, ?, ?)", {
+        identifier, casinoId or 0, item, amount
+    })
+end
+
+-- Gives chips back now if the player is still connected, otherwise stores
+-- them and pays them out the next time the character loads. Pass `dropped`
+-- from playerDropped handlers, where the player may still look online.
+function RefundCasinoChips(source, casinoId, amount, dropped)
+    amount = math.floor(tonumber(amount) or 0)
+    if amount <= 0 or not Casinos[casinoId] then return end
+    if not dropped and IsPlayerOnline(source) then
+        return AddCasinoChips(source, casinoId, amount)
+    end
+    QueuePendingRefund(source, casinoId, nil, amount)
+end
+
+-- Same as RefundCasinoChips, for a plain inventory item (e.g. a lucky ticket).
+function RefundCasinoItem(source, item, amount, dropped)
+    amount = math.floor(tonumber(amount) or 0)
+    if amount <= 0 or type(item) ~= "string" then return end
+    if not dropped and IsPlayerOnline(source) then
+        return Inventory.AddItem(source, item, amount)
+    end
+    QueuePendingRefund(source, 0, item, amount)
+end
+
+-- Pays out refunds stored while the player was offline. Each row is deleted
+-- before it is paid, so a row can only ever be paid once.
+function PayPendingRefunds(source)
+    local identifier = GetIdentifier(source)
+    if not identifier then return end
+    local rows = MySQL.query.await("SELECT `id`, `casino_id`, `item`, `amount` FROM `pickle_casino_pending_refunds` WHERE `identifier` = ?", { identifier }) or {}
+    for _, row in ipairs(rows) do
+        local amount = math.floor(tonumber(row.amount) or 0)
+        local casinoId = tonumber(row.casino_id)
+        local payable = amount > 0 and (row.item ~= nil or Casinos[casinoId] ~= nil)
+        if payable and IsPlayerOnline(source) then
+            local deleted = MySQL.update.await("DELETE FROM `pickle_casino_pending_refunds` WHERE `id` = ?", { row.id })
+            if deleted and deleted > 0 then
+                if row.item then
+                    Inventory.AddItem(source, row.item, amount)
+                else
+                    AddCasinoChips(source, casinoId, amount)
+                end
+                ShowNotification(source, _L("pending_refund_paid", NumberWithCommas(amount, true)))
+            end
+        end
+    end
+end
+
+-- Returns true if the inventory knows this item, false if it doesn't, or nil
+-- if the item list hasn't loaded yet.
+function DoesInventoryItemExist(name)
+    if type(name) ~= "string" or name == "" then return false end
+    if GetResourceState("ox_inventory") == "started" then
+        local ok, item = pcall(function() return exports.ox_inventory:Items(name) end)
+        if ok then return item ~= nil end
+    end
+    if not Inventory or not Inventory.Items or not Inventory.Ready or next(Inventory.Items) == nil then return nil end
+    return Inventory.Items[name] ~= nil
+end
+
+-- Returns the casino (other than `exceptCasinoId`) that already uses `item` as its chip.
+function GetCasinoUsingChipItem(item, exceptCasinoId)
+    for id, casino in pairs(Casinos) do
+        if id ~= exceptCasinoId and casino.settings.label ~= PERSONAL_CASINOS_LABEL and casino.settings.chipItem == item then
+            return casino
+        end
+    end
+end
+
+-- Validates a chip item chosen by an admin and tells them what's wrong.
+-- Returns the cleaned item name, or nil if it can't be used.
+function ValidateChipItem(source, item, casinoId)
+    if type(item) ~= "string" then
+        ShowNotification(source, _L("chip_item_invalid"))
+        return nil
+    end
+    item = item:match("^%s*(.-)%s*$")
+    if item == "" or #item > 100 then
+        ShowNotification(source, _L("chip_item_invalid"))
+        return nil
+    end
+    local exists = DoesInventoryItemExist(item)
+    if exists == nil then
+        ShowNotification(source, _L("chip_item_unverified"))
+        return nil
+    elseif not exists then
+        ShowNotification(source, _L("chip_item_not_found", item))
+        return nil
+    end
+    local other = GetCasinoUsingChipItem(item, casinoId)
+    if other then
+        ShowNotification(source, _L("chip_item_in_use", item, other.settings.label or tostring(other.id)))
+        return nil
+    end
+    return item
+end
+
+-- Console warnings for existing casinos whose chip item is missing from the
+-- inventory or shared with another casino. Runs once the item list is loaded.
+function WarnAboutCasinoChipItems()
+    CreateThread(function()
+        for _ = 1, 60 do
+            if DoesInventoryItemExist("__pickle_casinos_probe__") ~= nil then break end
+            Wait(500)
+        end
+        local seen = {}
+        for id, casino in pairs(Casinos) do
+            local item = casino.settings.chipItem
+            if casino.settings.label ~= PERSONAL_CASINOS_LABEL then
+                if DoesInventoryItemExist(item) == false then
+                    print(("^3[pickle_casinos] Casino '%s' (ID %s) uses chip item '%s', which doesn't exist in your inventory. Add the item or change the casino's chip item.^0"):format(tostring(casino.settings.label), tostring(id), tostring(item)))
+                end
+                if seen[item] then
+                    print(("^3[pickle_casinos] Casinos %s and %s share the chip item '%s'. Give each casino its own chip item.^0"):format(tostring(seen[item]), tostring(id), tostring(item)))
+                else
+                    seen[item] = id
+                end
+            end
+        end
+    end)
+end
+
 -- Shared guard for player-facing interactions with a casino entity: the casino
 -- must exist and be open (managers excepted), the entity must have the expected
 -- type, VIP-only entities require VIP, and the player must be near it.
@@ -586,6 +737,7 @@ function CanUseCasinoEntity(source, casinoId, entityId, expectedType)
     local entity = GetCasinoEntity(casinoId, entityId)
     if not entity then return false end
     if expectedType and entity.type ~= expectedType then return false end
+    RememberPlayerIdentifier(source)
     if not IsCasinoPersonalCasinos(casinoId) and not casino.settings.isOpen and not CanManageCasino(source, casinoId) then
         ShowNotification(source, _L("casino_closed"))
         return false
@@ -833,15 +985,20 @@ RegisterNetEvent("pickle_casinos:initializePlayer", function()
     })
     UpdateHorseTracks(source)
     UpdateObjects(source)
+    RememberPlayerIdentifier(source)
+    PayPendingRefunds(source)
 end)
 
 RegisterNetEvent("pickle_casinos:createCasino", function(data)
+    local source = source
     if type(data) ~= "table" then return end
     if not CanManageCasino(source) then return ShowNotification(source, _L("no_permission")) end
+    local chipItem = ValidateChipItem(source, data.chipItem)
+    if not chipItem then return end
     local casinoSettings = {
         label = type(data.label) == "string" and data.label or "UNKNOWN_LABEL",
         location = SanitizeLocation(data.location),
-        chipItem = type(data.chipItem) == "string" and data.chipItem or "UNKNOWN_CHIP_ITEM",
+        chipItem = chipItem,
         blipEnabled = data.blipEnabled or false,
         isOpen = true,
         cashEnabled = true,
@@ -889,7 +1046,10 @@ RegisterNetEvent("pickle_casinos:updateCasinoSetting", function(casinoId, variab
             casino.settings.label = "INVALID_LABEL"
         end
     elseif variable == "chipItem" then
-        casino.settings.chipItem = tostring(value) or "INVALID_CHIP_ITEM"
+        if casino.settings.label == PERSONAL_CASINOS_LABEL then return end
+        local chipItem = ValidateChipItem(source, value, casinoId)
+        if not chipItem then return end
+        casino.settings.chipItem = chipItem
     elseif variable == "blipEnabled" then
         casino.settings.blipEnabled = value and true or false
     elseif variable == "isOpen" then
@@ -1097,6 +1257,20 @@ CreateThread(function()
             TriggerClientEvent("pickle_casinos:createPlacedEntity", source, k)
         end)
     end
+    -- Chips/items owed to players who disconnected before a refund could be
+    -- given; paid out on their next character load (PayPendingRefunds).
+    MySQL.Async.execute([[
+        CREATE TABLE IF NOT EXISTS `pickle_casino_pending_refunds` (
+            `id` BIGINT UNSIGNED NOT NULL AUTO_INCREMENT,
+            `identifier` VARCHAR(255) NOT NULL,
+            `casino_id` INT NOT NULL DEFAULT 0,
+            `item` VARCHAR(100) DEFAULT NULL,
+            `amount` BIGINT NOT NULL,
+            `created_at` TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+            PRIMARY KEY (`id`),
+            KEY `idx_identifier` (`identifier`)
+        )
+    ]], {})
     MySQL.Async.execute([[
         CREATE TABLE IF NOT EXISTS `pickle_casino_ticket_progress` (
             `identifier` VARCHAR(255) NOT NULL PRIMARY KEY,
@@ -1197,6 +1371,7 @@ CreateThread(function()
                     vip_players = vip_players,
                 }, true)
             end
+            WarnAboutCasinoChipItems()
             if not personalCasinoFound then
                 MySQL.insert('INSERT INTO `pickle_casinos` (settings, entities, transactions, vip_players) VALUES (?, ?, ?, ?)', {
                     json.encode({

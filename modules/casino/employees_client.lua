@@ -70,6 +70,31 @@ RegisterNUICallback("hirePlayer", function(data, cb)
     end, tonumber(data.casinoId), tonumber(data.targetSource))
 end)
 
+-- Asked by the server when a manager tries to hire this player. Returns true
+-- only if the player explicitly accepts.
+local hireDialogOpen = false
+
+lib.callback.register("pickle_casinos:confirmHire", function(casinoLabel, managerName)
+    if hireDialogOpen then return false end
+    hireDialogOpen = true
+    local result = lib.alertDialog({
+        header = _L("employee_hire_offer_header"),
+        content = _L("employee_hire_offer_content", managerName or "?", casinoLabel or "?"),
+        centered = true,
+        cancel = true,
+        labels = { confirm = _L("employee_hire_accept"), cancel = _L("employee_hire_decline") },
+    })
+    hireDialogOpen = false
+    return result == "confirm"
+end)
+
+-- The server stopped waiting (offer expired): close the dialog if it's still up.
+RegisterNetEvent("pickle_casinos:closeHireOffer", function()
+    if hireDialogOpen then
+        lib.closeAlertDialog()
+    end
+end)
+
 RegisterNUICallback("getNearbyPlayers", function(data, cb)
     local resolve = SafeCb(cb, {})
     lib.callback("pickle_casinos:getNearbyPlayers", false, function(players)

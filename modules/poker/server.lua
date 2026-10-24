@@ -597,12 +597,12 @@ function StartPokerGame(casinoId, entityId)
     end)
 end
 
-function LeavePokerEntity(source, casinoId, entityId, seatId)
+function LeavePokerEntity(source, casinoId, entityId, seatId, dropped)
     local entity = GetCasinoEntity(casinoId, entityId)
     if not entity then return end
     local source = entity.seats[seatId].source
     if entity.seats[seatId].balance > 0 then
-        AddCasinoChips(source, casinoId, entity.seats[seatId].balance)
+        RefundCasinoChips(source, casinoId, entity.seats[seatId].balance, dropped)
     end
     if PokerTransactions[source] then
         EndCasinoGameplayTransaction(PokerTransactions[source], source, casinoId, entityId, "poker", entity.seats[seatId].balance)
@@ -714,7 +714,7 @@ AddEventHandler('playerDropped', function()
     local seatId = playerInfo.seatId
     local entity = GetCasinoEntity(casinoId, entityId)
     if not entity then return end
-    LeavePokerEntity(source, casinoId, entityId, seatId)
+    LeavePokerEntity(source, casinoId, entityId, seatId, true)
 end)
 
 RegisterCallback("pickle_casinos:poker:requestSeat", function(source, cb, casinoId, entityId, seatId)
