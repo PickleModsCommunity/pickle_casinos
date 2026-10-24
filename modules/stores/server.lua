@@ -3,9 +3,7 @@ function InitializeStoreEntity(casinoId, data)
     return entity
 end
 
-RegisterNetEvent("pickle_casinos:storePurchase", function(casinoId, entityId, itemIndex, amount)
-    local source = source
-    PerformCooldownProcess(source)
+local function ProcessStorePurchase(source, casinoId, entityId, itemIndex, amount)
     local canUse, casino, casinoEntity = CanUseCasinoEntity(source, casinoId, entityId, "store")
     if not canUse then return end
     local storeCfg = Config.CreatorOptions.stores[casinoEntity.settings.store]
@@ -21,14 +19,19 @@ RegisterNetEvent("pickle_casinos:storePurchase", function(casinoId, entityId, it
     if not amount then return ShowNotification(source, _L("invalid_amount")) end
     local itemName = item.item
     local price = item.price * amount
+    -- Take the money first; only hand over the items if that really succeeded.
     if price > 0 and not TryRemoveMoney(source, price) then
         return ShowNotification(source, _L("insufficient_funds"))
     end
-    Inventory.AddItem(source, itemName, amount)
+    if Inventory.AddItem(source, itemName, amount) == false then
+        -- Couldn't hand over the items (e.g. inventory full): give the money back.
+        if price > 0 then AddMoney(source, price) end
+        return ShowNotification(source, _L("store_items_not_added"))
+    end
     ShowNotification(source, _L("store_purchase_success", NumberWithCommas(amount, true), GetItemLabel(item.item), NumberWithCommas(price)))
     local profit = math.floor(price * (Config.Casinos.profitPercent / 100))
     AddCasinoTransaction(source, casinoId, "purchase", profit)
-    if IsCasinoOwned(casinoId) then 
+    if IsCasinoOwned(casinoId) then
         casino.balance = (casino.balance or 0) + profit
         MySQL.Async.execute('UPDATE `pickle_casinos` SET balance = ? WHERE id = ?', {
             casino.balance,
@@ -36,4 +39,13 @@ RegisterNetEvent("pickle_casinos:storePurchase", function(casinoId, entityId, it
         })
         TriggerClientEvent("pickle_casinos:updateCasinoBalance", -1, casinoId, casino.balance, casino.marked_balance)
     end
+end
+
+RegisterNetEvent("pickle_casinos:storePurchase", function(casinoId, entityId, itemIndex, amount)
+    local source = source
+    PerformCooldownProcess(source)
+    -- One purchase at a time per player (queued requests are rejected, not stacked).
+    WithEconomyLock(source, function()
+        ProcessStorePurchase(source, casinoId, entityId, itemIndex, amount)
+    end)
 end)

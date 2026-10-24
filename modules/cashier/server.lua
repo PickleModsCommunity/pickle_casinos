@@ -29,9 +29,18 @@ RegisterCallback("pickle_casinos:getBalances", function(source, cb, casinoId, en
     })
 end)
 
+local ProcessCasinoExchange
+
 RegisterNetEvent("pickle_casinos:casinoExchange", function(casinoId, entityId, exchangeType, param, param2)
     local source = source
     PerformCooldownProcess(source)
+    -- One exchange at a time per player (queued requests are rejected, not stacked).
+    WithEconomyLock(source, function()
+        ProcessCasinoExchange(source, casinoId, entityId, exchangeType, param, param2)
+    end)
+end)
+
+ProcessCasinoExchange = function(source, casinoId, entityId, exchangeType, param, param2)
     if not CanUseCasinoEntity(source, casinoId, entityId, "cashier") then return end
     local maxAmount = Config.MaximumChipPurchaseAmount
     if exchangeType == "buy" then
@@ -54,7 +63,14 @@ RegisterNetEvent("pickle_casinos:casinoExchange", function(casinoId, entityId, e
         local multiplier = exchangeRate / 100
         local chips = math.floor(amount * multiplier)
         if chips <= 0 then return end
+        -- Take the money first (atomic check-and-remove in the inventory); grant
+        -- chips only if that really succeeded.
         if not TryRemoveMoney(source, amount, currency) then return ShowNotification(source, _L("insufficient_funds")) end
+        if Inventory.AddItem(source, casino.settings.chipItem, chips) == false then
+            -- Couldn't hand over the chips (e.g. inventory full): give the money back.
+            AddMoney(source, amount, currency)
+            return ShowNotification(source, _L("cashier_chips_not_added"))
+        end
         ShowNotification(source, _L("cashier_bought_chips", NumberWithCommas(chips, true), NumberWithCommas(amount), currency == "money" and _L("cashier_buy_currency_type_cash") or _L("cashier_buy_currency_type_dirty")))
         ConfigSV.WebhookHandler("purchaseChips", {
             casinoId = casinoId,
@@ -78,7 +94,6 @@ RegisterNetEvent("pickle_casinos:casinoExchange", function(casinoId, entityId, e
             TriggerClientEvent("pickle_casinos:updateCasinoBalance", -1, casinoId, casino.balance, casino.marked_balance)
         end
         AddCasinoTransaction(source, casinoId, "deposit", amount)
-        Inventory.AddItem(source, casino.settings.chipItem, chips)
     elseif exchangeType == "sell" then
         local amount = SanitizeInt(param2, 1, maxAmount)
         if not amount then return ShowNotification(source, _L("invalid_amount")) end
@@ -89,9 +104,7 @@ RegisterNetEvent("pickle_casinos:casinoExchange", function(casinoId, entityId, e
         local casinoBalance = casino.balance or 0
         if IsCasinoOwned(casinoId) and amount > casinoBalance then return end
         -- Take the chips first; only pay out if they were actually removed.
-        Inventory.RemoveItem(source, casino.settings.chipItem, amount)
-        local remaining = Inventory.GetItemCount(source, casino.settings.chipItem) or 0
-        if (chips - remaining) < amount then return end
+        if not TryRemoveItem(source, casino.settings.chipItem, amount) then return end
         if IsCasinoOwned(casinoId) then
             casino.balance = casinoBalance - amount
             MySQL.Async.execute('UPDATE `pickle_casinos` SET balance = ?, marked_balance = ? WHERE id = ?', {
@@ -112,13 +125,21 @@ RegisterNetEvent("pickle_casinos:casinoExchange", function(casinoId, entityId, e
         })
         AddCasinoTransaction(source, casinoId, "withdraw", amount)
     else
-        return 
+        return
     end
-end)
+end
+
+local ProcessVIPPurchase
 
 RegisterNetEvent("pickle_casinos:purchaseVIP", function(casinoId, entityId)
     local source = source
     PerformCooldownProcess(source)
+    WithEconomyLock(source, function()
+        ProcessVIPPurchase(source, casinoId, entityId)
+    end)
+end)
+
+ProcessVIPPurchase = function(source, casinoId, entityId)
     if not CanUseCasinoEntity(source, casinoId, entityId, "cashier") then return end
     local identifier = GetIdentifier(source)
     if not identifier then return end
@@ -162,4 +183,4 @@ RegisterNetEvent("pickle_casinos:purchaseVIP", function(casinoId, entityId)
         -- avoid littering the management view with $0 rows.
         AddCasinoTransaction(source, casinoId, "vip", vipPrice)
     end
-end)
+end

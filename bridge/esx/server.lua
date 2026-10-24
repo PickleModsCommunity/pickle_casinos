@@ -69,6 +69,7 @@ end
 
 function AddMoney(source, count, currency)
     local xPlayer = ESX.GetPlayerFromId(source)
+    if not xPlayer then return end
     local currency = currency or "money"
     if (currency == "money") then
         xPlayer.addMoney(count)
@@ -78,26 +79,59 @@ function AddMoney(source, count, currency)
     TriggerClientEvent("pickle_casinos:updateMoney", source, GetMoney(source, currency))
 end
 
+-- With ox_inventory, cash and black money are inventory items, and the item is
+-- the source of truth. ESX's account value is only a synced copy.
+local function UsingOxInventory()
+    return GetResourceState("ox_inventory") == "started"
+end
+
+local function GetAccountItemName(currency)
+    return (currency == "dirty") and "black_money" or "money"
+end
+
+-- Removes money and returns true only if it was really taken. With
+-- ox_inventory this is a single check-and-remove on the item itself, so a
+-- stale ESX balance can't make a failed removal look successful.
 function RemoveMoney(source, count, currency)
     local xPlayer = ESX.GetPlayerFromId(source)
+    if not xPlayer then return false end
     local currency = currency or "money"
-    if (currency == "money") then
-        xPlayer.removeMoney(count)
-    elseif (currency == "dirty") then
-        xPlayer.removeAccountMoney("black_money", count)
+    if currency ~= "money" and currency ~= "dirty" then return false end
+    local success
+    if UsingOxInventory() then
+        success = exports.ox_inventory:RemoveItem(source, GetAccountItemName(currency), count) == true
+    else
+        local before = GetMoney(source, currency)
+        local result
+        if currency == "money" then
+            result = xPlayer.removeMoney(count)
+        else
+            result = xPlayer.removeAccountMoney("black_money", count)
+        end
+        if result == false then
+            success = false
+        else
+            -- Older ESX versions return nothing; confirm the balance dropped.
+            success = (before - GetMoney(source, currency)) >= count
+        end
     end
     TriggerClientEvent("pickle_casinos:updateMoney", source, GetMoney(source, currency))
+    return success
 end
 
 function GetMoney(source, currency)
     local xPlayer = ESX.GetPlayerFromId(source)
+    if not xPlayer then return 0 end
     local currency = currency or "money"
     local money = 0
-    if (currency == "money") then
+    if UsingOxInventory() then
+        money = exports.ox_inventory:GetItemCount(source, GetAccountItemName(currency)) or 0
+    elseif (currency == "money") then
         money = xPlayer.getMoney()
     elseif (currency == "dirty") then
-        money = xPlayer.getAccount("black_money").money
-    end    
+        local account = xPlayer.getAccount("black_money")
+        money = account and account.money or 0
+    end
     TriggerClientEvent("pickle_casinos:updateMoney", source, money)
     return money
 end
@@ -293,16 +327,36 @@ CreateThread(function()
         end)
     end
 
+    -- AddItem/RemoveItem return true only when the inventory really changed.
+    -- With ox_inventory they call it directly (one atomic check-and-change).
     Inventory.AddItem = function(source, name, count, metadata) -- Metadata is not required.
         local xPlayer = ESX.GetPlayerFromId(source)
-        xPlayer.addInventoryItem(name, count)
+        if not xPlayer then return false end
+        local success
+        if GetResourceState("ox_inventory") == "started" then
+            success = exports.ox_inventory:AddItem(source, name, count, metadata) == true
+        else
+            local before = Inventory.GetItemCount(source, name)
+            xPlayer.addInventoryItem(name, count)
+            success = (Inventory.GetItemCount(source, name) - before) >= count
+        end
         Inventory.UpdateInventory(source)
+        return success
     end
 
     Inventory.RemoveItem = function(source, name, count)
         local xPlayer = ESX.GetPlayerFromId(source)
-        xPlayer.removeInventoryItem(name, count)
+        if not xPlayer then return false end
+        local success
+        if GetResourceState("ox_inventory") == "started" then
+            success = exports.ox_inventory:RemoveItem(source, name, count) == true
+        else
+            local before = Inventory.GetItemCount(source, name)
+            xPlayer.removeInventoryItem(name, count)
+            success = (before - Inventory.GetItemCount(source, name)) >= count
+        end
         Inventory.UpdateInventory(source)
+        return success
     end
 
     Inventory.AddWeapon = function(source, name, count, metadata) -- Metadata is not required.
@@ -318,7 +372,11 @@ CreateThread(function()
     end
 
     Inventory.GetItemCount = function(source, name)
+        if GetResourceState("ox_inventory") == "started" then
+            return exports.ox_inventory:GetItemCount(source, name) or 0
+        end
         local xPlayer = ESX.GetPlayerFromId(source)
+        if not xPlayer then return 0 end
         local item = xPlayer.getInventoryItem(name)
         return item and item.count or 0
     end

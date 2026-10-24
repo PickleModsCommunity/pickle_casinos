@@ -559,23 +559,54 @@ function RemoveCasinoChips(source, casinoId, amount)
     if casino.settings.label == PERSONAL_CASINOS_LABEL then
         return TryRemoveMoney(source, amount)
     end
-    local before = Inventory.GetItemCount(source, casino.settings.chipItem) or 0
+    return TryRemoveItem(source, casino.settings.chipItem, amount)
+end
+
+-- Removes an item and returns true only if the full amount was actually taken.
+-- The bridges return the inventory's own success value (a single atomic
+-- check-and-remove with ox_inventory); the before/after comparison is only a
+-- fallback for custom bridges that return nothing.
+function TryRemoveItem(source, item, amount)
+    amount = SanitizeInt(amount, 1)
+    if not amount then return false end
+    local before = Inventory.GetItemCount(source, item) or 0
     if before < amount then return false end
-    Inventory.RemoveItem(source, casino.settings.chipItem, amount)
-    local after = Inventory.GetItemCount(source, casino.settings.chipItem) or 0
-    return (before - after) >= amount
+    local result = Inventory.RemoveItem(source, item, amount)
+    if result ~= nil then return result == true end
+    return (before - (Inventory.GetItemCount(source, item) or 0)) >= amount
 end
 
 -- Removes money and returns true only if the full amount was actually taken.
+-- Never grant anything paid for with money unless this returned true.
 function TryRemoveMoney(source, amount, currency)
     amount = SanitizeInt(amount, 1)
     if not amount then return false end
     local before = GetMoney(source, currency) or 0
     if before < amount then return false end
-    RemoveMoney(source, amount, currency)
-    local after = GetMoney(source, currency) or 0
-    return (before - after) >= amount
+    local result = RemoveMoney(source, amount, currency)
+    if result ~= nil then return result == true end
+    return (before - (GetMoney(source, currency) or 0)) >= amount
 end
+
+-- Serialises economy actions per player. Several requests queued during a
+-- network drop arrive together; handlers that wait on the database could
+-- otherwise interleave. Returns false (and runs nothing) if one is in progress.
+local EconomyLocks = {}
+
+function WithEconomyLock(source, fn)
+    if EconomyLocks[source] then return false end
+    EconomyLocks[source] = true
+    local ok, err = pcall(fn)
+    EconomyLocks[source] = nil
+    if not ok then
+        print(("^1[pickle_casinos] economy action error for %s: %s^0"):format(tostring(source), tostring(err)))
+    end
+    return true
+end
+
+AddEventHandler("playerDropped", function()
+    EconomyLocks[source] = nil
+end)
 
 -- Identifiers of players who have interacted with the casino, kept briefly
 -- after they drop so disconnect handlers can still credit them.
@@ -1127,10 +1158,7 @@ RegisterNetEvent("pickle_casinos:createCasinoEntity", function(casinoId, entityT
         local placeableCfg = Config.PlaceableEntities[entityType]
         if not placeableCfg then return end
         local item = placeableCfg.item
-        local before = Inventory.GetItemCount(source, item) or 0
-        if before < 1 then return end
-        Inventory.RemoveItem(source, item, 1)
-        if (Inventory.GetItemCount(source, item) or 0) >= before then return end
+        if not TryRemoveItem(source, item, 1) then return end
     end
     local entityId = GenerateEntityId(casinoId)
     local entity = {
@@ -1195,8 +1223,7 @@ RegisterNetEvent("pickle_casinos:updateCasinoEntitySetting", function(casinoId, 
     TriggerClientEvent("pickle_casinos:updateCasinoEntitySetting", -1, casinoId, entityId, variable, entity.settings[variable])
 end)
 
-RegisterNetEvent("pickle_casinos:startCasinoTransfer", function(casinoId, transferInfo)
-    local source = source
+local function ProcessCasinoTransfer(source, casinoId, transferInfo)
     if not CanManageCasino(source, casinoId) then return ShowNotification(source, _L("no_permission")) end
     PerformCooldownProcess(source)
     local casino = Casinos[casinoId]
@@ -1244,6 +1271,14 @@ RegisterNetEvent("pickle_casinos:startCasinoTransfer", function(casinoId, transf
         casinoId
     })
     TriggerClientEvent("pickle_casinos:updateCasinoBalance", -1, casinoId, casino.balance, casino.marked_balance)
+end
+
+RegisterNetEvent("pickle_casinos:startCasinoTransfer", function(casinoId, transferInfo)
+    local source = source
+    -- One transfer at a time per player (queued requests are rejected, not stacked).
+    WithEconomyLock(source, function()
+        ProcessCasinoTransfer(source, casinoId, transferInfo)
+    end)
 end)
 
 RegisterCommand("casinos", function(source, args, raw)

@@ -64,39 +64,67 @@ function CheckPermission(source, permission)
     end
 end
 
+-- With ox_inventory, cash is the "money" item and the item is the source of
+-- truth (the framework's cash value is a synced copy).
+local function UsingOxInventory()
+    return GetResourceState("ox_inventory") == "started"
+end
+
+local function GetDirtyMoneyItem()
+    local setting = Config.FrameworkSettings.dirtyMoney
+    return setting == "DEFAULT" and 'dirty_money' or setting
+end
+
 function AddMoney(source, count, currency)
     local xPlayer = QBCore.Functions.GetPlayer(tonumber(source))
+    if not xPlayer then return end
     local currency = currency or "money"
     if (currency == "money") then
         xPlayer.Functions.AddMoney('cash', count)
     elseif (currency == "dirty") then
-        local setting = Config.FrameworkSettings.dirtyMoney
-        Inventory.AddItem(source, setting == "DEFAULT" and 'dirty_money' or setting, count)
+        Inventory.AddItem(source, GetDirtyMoneyItem(), count)
     end
-    TriggerClientEvent("pickle_casinos:updateMoney", source, money)
+    TriggerClientEvent("pickle_casinos:updateMoney", source, GetMoney(source, currency))
 end
 
+-- Removes money and returns true only if it was really taken.
 function RemoveMoney(source, count, currency)
     local xPlayer = QBCore.Functions.GetPlayer(tonumber(source))
+    if not xPlayer then return false end
     local currency = currency or "money"
+    local success = false
     if (currency == "money") then
-        xPlayer.Functions.RemoveMoney('cash', count)
+        if UsingOxInventory() then
+            success = exports.ox_inventory:RemoveItem(source, 'money', count) == true
+        else
+            local before = xPlayer.PlayerData.money.cash or 0
+            local result = xPlayer.Functions.RemoveMoney('cash', count)
+            if result == nil then
+                success = (before - (xPlayer.PlayerData.money.cash or 0)) >= count
+            else
+                success = result == true
+            end
+        end
     elseif (currency == "dirty") then
-        local setting = Config.FrameworkSettings.dirtyMoney
-        Inventory.RemoveItem(source, setting == "DEFAULT" and 'dirty_money' or setting, count)
+        success = Inventory.RemoveItem(source, GetDirtyMoneyItem(), count) == true
     end
-    TriggerClientEvent("pickle_casinos:updateMoney", source, money)
+    TriggerClientEvent("pickle_casinos:updateMoney", source, GetMoney(source, currency))
+    return success
 end
 
 function GetMoney(source, currency)
     local xPlayer = QBCore.Functions.GetPlayer(tonumber(source))
+    if not xPlayer then return 0 end
     local currency = currency or "money"
     local money = 0
     if (currency == "money") then
-        money = xPlayer.PlayerData.money.cash
+        if UsingOxInventory() then
+            money = exports.ox_inventory:GetItemCount(source, 'money') or 0
+        else
+            money = xPlayer.PlayerData.money.cash or 0
+        end
     elseif (currency == "dirty") then
-        local setting = Config.FrameworkSettings.dirtyMoney
-        money = Inventory.GetItemCount(source, setting == "DEFAULT" and 'dirty_money' or setting)
+        money = Inventory.GetItemCount(source, GetDirtyMoneyItem())
     end
     TriggerClientEvent("pickle_casinos:updateMoney", source, money)
     return money
@@ -270,16 +298,45 @@ CreateThread(function()
         end)
     end
 
+    -- AddItem/RemoveItem return true only when the inventory really changed.
     Inventory.AddItem = function(source, name, count, metadata) -- Metadata is not required.
         local xPlayer = QBCore.Functions.GetPlayer(tonumber(source))
-        xPlayer.Functions.AddItem(name, count, nil, metadata)
+        if not xPlayer then return false end
+        local success
+        if GetResourceState("ox_inventory") == "started" then
+            success = exports.ox_inventory:AddItem(source, name, count, metadata) == true
+        else
+            local before = Inventory.GetItemCount(source, name)
+            local result = xPlayer.Functions.AddItem(name, count, nil, metadata)
+            if result == nil then
+                -- Some inventories return nothing; confirm the count went up.
+                success = (Inventory.GetItemCount(source, name) - before) >= count
+            else
+                success = result == true
+            end
+        end
         Inventory.UpdateInventory(source)
+        return success
     end
 
     Inventory.RemoveItem = function(source, name, count)
         local xPlayer = QBCore.Functions.GetPlayer(tonumber(source))
-        xPlayer.Functions.RemoveItem(name, count)
+        if not xPlayer then return false end
+        local success
+        if GetResourceState("ox_inventory") == "started" then
+            success = exports.ox_inventory:RemoveItem(source, name, count) == true
+        else
+            local before = Inventory.GetItemCount(source, name)
+            local result = xPlayer.Functions.RemoveItem(name, count)
+            if result == nil then
+                -- Some inventories return nothing; confirm the count went down.
+                success = (before - Inventory.GetItemCount(source, name)) >= count
+            else
+                success = result == true
+            end
+        end
         Inventory.UpdateInventory(source)
+        return success
     end
 
     Inventory.AddWeapon = function(source, name, count, metadata) -- Metadata is not required.
@@ -291,6 +348,9 @@ CreateThread(function()
     end
 
     Inventory.GetItemCount = function(source, name)
+        if GetResourceState("ox_inventory") == "started" then
+            return exports.ox_inventory:GetItemCount(source, name) or 0
+        end
         local xPlayer = QBCore.Functions.GetPlayer(tonumber(source))
         if not xPlayer then return 0 end
         local item = xPlayer.Functions.GetItemByName(name)

@@ -84,8 +84,7 @@ function ConsumeLuckyTicket(source)
         count = Inventory.GetItemCount(source, itemName) or 0
     end
     if (count or 0) < 1 then return false end
-    Inventory.RemoveItem(source, itemName, 1)
-    return (Inventory.GetItemCount(source, itemName) or 0) < count
+    return TryRemoveItem(source, itemName, 1)
 end
 
 function HasLuckyTicket(source)
