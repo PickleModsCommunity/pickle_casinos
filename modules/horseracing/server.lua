@@ -62,12 +62,11 @@ function StartHorseRacingTrackRace(trackId)
         end
         if totalWager > 0 then
             local money = GetCasinoChips(source, track.players[source].casinoId)
-            if money < totalWager then
+            if money < totalWager or not RemoveCasinoChips(source, track.players[source].casinoId, totalWager) then
                 track.players[source].wagers = GetDefaultWager()
                 TriggerClientEvent("pickle_casinos:horseracing:updateWager", source, track.players[source].casinoId, trackId, track.players[source].wagers)
             else
                 LastWagers[source] = track.players[source].wagers
-                RemoveCasinoChips(source, track.players[source].casinoId, totalWager)
                 RegisterLuckyTicketWager(source, "horseracing", totalWager)
                 transactions[source] = StartCasinoGameplayTransaction(source, track.players[source].casinoId, track.players[source].entityId, "horseracing", totalWager)
             end
@@ -78,7 +77,7 @@ function StartHorseRacingTrackRace(trackId)
     local multiplier = Config.HorseRacing.odds[track.horses[track.stage.winner].oddsIndex].multiplier
     for source,player in pairs(track.players) do
         local winnings = (player.wagers[track.stage.winner] or 0) * multiplier
-        if winnings > 0 then
+        if winnings > 0 and transactions[source] then
             AddCasinoChips(source, player.casinoId, player.wagers[track.stage.winner] + winnings)
             TriggerClientEvent("pickle_casinos:displayResults", source, player.wagers[track.stage.winner] + winnings, GetCasinoChips(source, player.casinoId))
         end
@@ -150,7 +149,7 @@ function GenerateHorses()
 end
 
 function UpdateHorseTracks(source)
-    TriggerClientEvent("pickle_casinos:horseracing:updateTracks", source, Tracks)
+    TriggerClientEvent("pickle_casinos:horseracing:updateTracks", source, GetPublicHorseTracks())
 end
 
 -- Send a track-stage update only to players who are within the track's renderDistance.
@@ -179,31 +178,33 @@ end
 RegisterNetEvent("pickle_casinos:horseracing:setWager", function(casinoId, entityId, trackId, wager)
     local source = tonumber(source)
     PerformCooldownProcess(source)
-    local casino = Casinos[casinoId]
-    if not casino then return end
+    local canUse, casino, casinoEntity = CanUseCasinoEntity(source, casinoId, entityId, "horseracing")
+    if not canUse then return end
     local track = Tracks[trackId]
     if not track then return end
     if track.stage.type ~= "waiting" then return end
-    local casinoEntity = GetHorseRacingEntity(casinoId, entityId)
     local wagers = {}
-    if type(wager) == "table" then 
-        for i,v in pairs(wager) do
-            local subWager = wager[i]
-            if subWager then
-                local value = tonumber(subWager) or 0
-                if value < 0 then value = 0 end
-                wagers[tonumber(i) + 1] = value
-            else
-                wagers[tonumber(i) + 1] = 0
+    if type(wager) == "table" then
+        -- The NUI sends horses keyed "0".."11"; build a fixed 1..12 table from
+        -- whole, non-negative chip amounts only.
+        wagers = GetDefaultWager()
+        local valid = true
+        for i, v in pairs(wager) do
+            local index = SanitizeInt(i, 0, #wagers - 1)
+            local value = SanitizeInt(v, 0)
+            if not index or not value then
+                valid = false
+                break
             end
+            wagers[index + 1] = value
         end
         local totalWager = 0
         for i=1, #wagers do
             totalWager = totalWager + wagers[i]
         end
         local money = GetCasinoChips(source, casinoId)
-        if money < totalWager or totalWager > casinoEntity.betRange[2] then      
-            wagers = track.players[source] and (track.players[source].wagers or GetDefaultWager()) or GetDefaultWager()  
+        if not valid or money < totalWager or totalWager > casinoEntity.betRange[2] then
+            wagers = track.players[source] and (track.players[source].wagers or GetDefaultWager()) or GetDefaultWager()
         end
     elseif wager == "repeat" then
         wagers = LastWagers[source] or GetDefaultWager()
@@ -226,15 +227,28 @@ CreateThread(function()
     InitializeHorseRacingTracks()
 end)
 
+-- Tracks without other players' bets.
+function GetPublicHorseTracks()
+    local out = {}
+    for id, track in pairs(Tracks) do
+        local copy = {}
+        for k, v in pairs(track) do
+            if k ~= "players" then copy[k] = v end
+        end
+        out[id] = copy
+    end
+    return out
+end
+
 RegisterCallback("pickle_casinos:horseracing:getHorseRacingInfo", function(source, cb, casinoId)
     cb({
         money = GetCasinoChips(source, casinoId),
-        tracks = Tracks,
+        tracks = GetPublicHorseTracks(),
     })
 end)
 
 
-AddEventHandler('playerDropped', function()
+AddEventHandler("pickle_casinos:playerUnloaded", function(source)
     local source = source
     for k,v in pairs(Tracks) do
         if v.players[source] then

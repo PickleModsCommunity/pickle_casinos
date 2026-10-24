@@ -451,8 +451,9 @@ function ApplyThunderRouletteWagers(wagers)
     local connects = GetDefaultThunderRouletteConnections()
     if wagers then
         for i=1, #connects do
-            local w = tonumber(wagers[i])
-            connects[i].wager = (w and w > 0) and w or 0
+            -- Whole chips only: inventories round fractional counts.
+            local w = SanitizeInt(wagers[i], 0)
+            connects[i].wager = w or 0
         end
     end
     return connects

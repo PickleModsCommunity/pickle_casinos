@@ -12,19 +12,33 @@ local function getItemName()
     return (cfg and cfg.item) or "lucky_ticket"
 end
 
+-- Callbacks waiting on an in-flight DB load, keyed by identifier. Without this,
+-- two wagers before the first load finished would each load (and later save)
+-- their own copy of the row.
+local PendingLoads = {}
+
 local function loadProgress(identifier, cb)
     if LuckyTicketProgress[identifier] then
         cb(LuckyTicketProgress[identifier])
         return
     end
+    if PendingLoads[identifier] then
+        table.insert(PendingLoads[identifier], cb)
+        return
+    end
+    PendingLoads[identifier] = { cb }
     MySQL.Async.fetchAll("SELECT wager_total, tickets_earned FROM `pickle_casino_ticket_progress` WHERE identifier = ?", { identifier }, function(rows)
         local row = rows and rows[1]
-        local entry = {
+        local entry = LuckyTicketProgress[identifier] or {
             wager_total = (row and tonumber(row.wager_total)) or 0,
             tickets_earned = (row and tonumber(row.tickets_earned)) or 0,
         }
         LuckyTicketProgress[identifier] = entry
-        cb(entry)
+        local waiting = PendingLoads[identifier] or {}
+        PendingLoads[identifier] = nil
+        for _, waitingCb in ipairs(waiting) do
+            waitingCb(entry)
+        end
     end)
 end
 
@@ -47,15 +61,16 @@ function RegisterLuckyTicketWager(source, gameKey, chips)
     local perTicket = tonumber(cfg.chipsPerTicket) or 0
     if perTicket <= 0 then return end
 
+    local session = GetCasinoPlayerSession(source)
     loadProgress(identifier, function(entry)
         entry.wager_total = (entry.wager_total or 0) + chips
         local totalEarned = math.floor(entry.wager_total / perTicket)
         local newTickets = totalEarned - (entry.tickets_earned or 0)
         if newTickets > 0 then
             local itemName = getItemName()
-            Inventory.AddItem(source, itemName, newTickets)
+            RefundCasinoItem(source, itemName, newTickets, not IsCasinoPlayerSession(source, session), identifier)
             entry.tickets_earned = totalEarned
-            if ShowNotification then
+            if ShowNotification and IsCasinoPlayerSession(source, session) then
                 ShowNotification(source, _L("ticket_earned", newTickets))
             end
         end
@@ -70,8 +85,7 @@ function ConsumeLuckyTicket(source)
         count = Inventory.GetItemCount(source, itemName) or 0
     end
     if (count or 0) < 1 then return false end
-    Inventory.RemoveItem(source, itemName, 1)
-    return true
+    return TryRemoveItem(source, itemName, 1)
 end
 
 function HasLuckyTicket(source)
@@ -121,9 +135,9 @@ RegisterCommand("setwheelticket", function(source, args)
 end, false)
 
 -- Clean up cache on disconnect (final save already happens on every update).
-AddEventHandler('playerDropped', function()
+AddEventHandler("pickle_casinos:playerUnloaded", function(source)
     local src = source
-    local identifier = GetIdentifier and GetIdentifier(src) or nil
+    local identifier = GetKnownIdentifier(src)
     if identifier and LuckyTicketProgress[identifier] then
         local entry = LuckyTicketProgress[identifier]
         saveProgress(identifier, entry)

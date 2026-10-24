@@ -3,10 +3,14 @@ Config.Language = "en"
 Config.Debug = false -- This enables debugging prints.
 Config.RenderDistance = 50.0
 Config.InteractDistance = 2.5
+Config.PerformanceMode = true -- Send live game/casino updates only to nearby players. Static map/layout changes still sync globally.
+Config.CasinoSyncDistance = 150.0 -- Radius around each table/casino in metres; always at least RenderDistance + 25.
+Config.PerformanceUpdateInterval = 1000 -- Server proximity refresh in ms (250-5000). New arrivals receive fresh public game state.
 Config.UseTarget = true -- This enables the use of the target system when available.
 Config.UseObjectGizmo = false -- This enables the use of object_gizmo for placing objects. If false, it uses the default movement system.
 Config.MaximumChipPurchaseAmount = 1000000 -- Maximum amount of chips a player can purchase at once.
 Config.MaximumItemPurchaseAmount = 100 -- Maximum amount of items a player can purchase at once.
+Config.ExchangeRateLimits = { min = 1, max = 100 } -- Allowed range (percent) for casino owners' chip exchange rates. Keep max at 100 or below so buying chips never gives more chips than the money paid.
 Config.ImageDirectory = "nui://ox_inventory/web/images/" -- (QB: nui://qb-inventory/html/images/) This is the directory where the images are stored. It should be a relative path to the resource folder.
 Config.DisableIPIdentifier = true -- This disables the IP identifier from being sent to the logs.
 Config.DisplayCurrencyAsChips = false -- This shows bet amounts and winnings as a number without any currency - set as false to disable this.
@@ -160,6 +164,11 @@ Config.FrameworkSettings = {
     -- Note to framework creators: stop breaking your frameworks by moving / removing stuff in big 2025, if it continues I'm making pickle core
     society = "qb-management", -- This is the society that the casinos will use to pay taxes. (qb-management or qb-banking, if using ESX don't worry it's automatic)
     dirtyMoney = "DEFAULT", -- DEFAULT / item name (black_money, marked_bills, etc).
+    -- How cash is stored on your server:
+    --   "auto"  = detect it: with ox_inventory, cash is an item when "money" is in the inventory:accounts convar (ox_inventory's default); otherwise it's a framework account.
+    --   false   = cash is always a framework account (player money / cash balance), never an item.
+    --   "money" (or another item name) = your inventory stores cash as this item.
+    cashItem = "auto",
 }
 
 Config.Casinos = {

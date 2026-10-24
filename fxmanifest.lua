@@ -40,6 +40,7 @@ server_scripts {
 	"modules/**/server.lua",
 	"modules/casino/employees_server.lua",
     "core/server.lua",
+    "core/proximity_server.lua",
 	"config_sv.lua",
 }
 

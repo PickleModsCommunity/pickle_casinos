@@ -16,14 +16,14 @@ function JoinBaccaratEntity(source, casinoId, entityId, seatId)
     if CurrentPlayers[source] then
         for i=1, #entity.seats do
             if entity.seats[i].source == source then
-                entity.seats[seatId].inSeat = true
+                entity.seats[i].inSeat = true
                 return i
             end
         end
         ShowNotification(source, _L("playing_other_game"))
         return
     end
-    if seatId == 0 then seatId = 1 end
+    seatId = SanitizeInt(seatId, 1, #entity.seats) or 1
     if entity.seats[seatId].source then
         seatId = nil
         for i=1, #entity.seats do
@@ -49,7 +49,7 @@ function JoinBaccaratEntity(source, casinoId, entityId, seatId)
     return seatId
 end
 
-function LeaveBaccaratEntity(source, casinoId, entityId, seatId)
+function LeaveBaccaratEntity(source, casinoId, entityId, seatId, dropped)
     local casino = Casinos[casinoId]
     if not casino then return end
     local entity = GetCasinoEntity(casinoId, entityId)
@@ -59,7 +59,7 @@ function LeaveBaccaratEntity(source, casinoId, entityId, seatId)
         if entity.stage and entity.stage.type == "waiting" then
             local refund = GetBaccaratTotalWager(entity.seats[seatId].wagers)
             if refund and refund > 0 then
-                AddCasinoChips(source, casinoId, refund)
+                RefundCasinoChips(source, casinoId, refund, dropped)
             end
         end
         entity.seats[seatId] = GenerateDefaultBaccaratSeat()
@@ -111,11 +111,16 @@ function StartBaccaratGame(casinoId, entityId)
                 entity.seats[i].wagers = GenerateBaccaratDefaultWagers()
                 TriggerClientCasinoEvent("pickle_casinos:baccarat:updateSeat", -1, casinoId, entityId, i, entity.seats[i])
             else
-                transactions[entity.seats[i].source] = StartCasinoGameplayTransaction(entity.seats[i].source, casinoId, entityId, "baccarat", GetBaccaratTotalWager(entity.seats[i].wagers))
+                local totalWager = GetBaccaratTotalWager(entity.seats[i].wagers)
+                transactions[entity.seats[i].source] = StartCasinoGameplayTransaction(entity.seats[i].source, casinoId, entityId, "baccarat", totalWager)
+                -- Ticket progress counts only once the stake is committed to a round
+                -- (bets can still be lowered and refunded while waiting).
+                RegisterLuckyTicketWager(entity.seats[i].source, "baccarat", totalWager - 2 * math.min(entity.seats[i].wagers.player or 0, entity.seats[i].wagers.banker or 0))
             end
         end
     end
-    CreateThread(function()
+    entity.roundPaid = false
+    CreateSafeGameThread("baccarat", function()
         local isFirstCard = true
         local round = 0
         repeat
@@ -144,7 +149,7 @@ function StartBaccaratGame(casinoId, entityId)
             done = true
         elseif playerValue <= 5 then
             playerThirdCard = GenerateCard()
-            entity.stage = {type = "dealing", side = "player", card = GenerateCard(), cardIndex = #entity.cards.player + 1}
+            entity.stage = {type = "dealing", side = "player", card = playerThirdCard, cardIndex = #entity.cards.player + 1}
             entity.cards.player[#entity.cards.player + 1] = entity.stage.card
             TriggerClientCasinoEvent("pickle_casinos:baccarat:updateStage", -1, casinoId, entityId, entity.stage)
             SetTimeout(1300, function()
@@ -164,15 +169,14 @@ function StartBaccaratGame(casinoId, entityId)
                     Wait(2000)
                 end
             else
-                if (bankerValue <= 2) then
-                    entity.stage = {type = "dealing", side = "banker", card = GenerateCard(), cardIndex = #entity.cards.banker + 1}
-                    entity.cards.banker[#entity.cards.banker + 1] = entity.stage.card
-                    TriggerClientCasinoEvent("pickle_casinos:baccarat:updateStage", -1, casinoId, entityId, entity.stage)
-                    SetTimeout(1300, function()
-                        TriggerClientCasinoEvent("pickle_casinos:baccarat:updateCards", -1, casinoId, entityId, "banker", entity.cards.banker)
-                    end)
-                    Wait(2000)
-                elseif (playerThirdCard.value ~= 8 and (bankerValue >= 3 and bankerValue <= 6)) then
+                -- Standard banker tableau, based on the point value of the player's third card.
+                local p3 = GetBaccaratCardsValue({playerThirdCard})
+                local bankerDraws = (bankerValue <= 2)
+                    or (bankerValue == 3 and p3 ~= 8)
+                    or (bankerValue == 4 and p3 >= 2 and p3 <= 7)
+                    or (bankerValue == 5 and p3 >= 4 and p3 <= 7)
+                    or (bankerValue == 6 and p3 >= 6 and p3 <= 7)
+                if bankerDraws then
                     entity.stage = {type = "dealing", side = "banker", card = GenerateCard(), cardIndex = #entity.cards.banker + 1}
                     entity.cards.banker[#entity.cards.banker + 1] = entity.stage.card
                     TriggerClientCasinoEvent("pickle_casinos:baccarat:updateStage", -1, casinoId, entityId, entity.stage)
@@ -233,7 +237,8 @@ function StartBaccaratGame(casinoId, entityId)
             winningWagers.bothSuitedPair = true
         end
         local seatResults = {}
-        for i=1, #entity.seats do 
+        entity.roundPaid = true
+        for i=1, #entity.seats do
             seatResults[i] = {won = 0, money = 0}
             if (entity.seats[i].source) then
                 for k,isWinner in pairs(winningWagers) do
@@ -287,6 +292,18 @@ function StartBaccaratGame(casinoId, entityId)
             entity.seats[k].wagers = GenerateBaccaratDefaultWagers()
             TriggerClientCasinoEvent("pickle_casinos:baccarat:updateSeatWager", -1, casinoId, entityId, k, entity.seats[k].wagers)
         end
+        StartBaccaratLobby(casinoId, entityId)
+    end, function()
+        -- The round crashed: refund stakes if payouts hadn't started, then reopen the table.
+        for k, seat in pairs(entity.seats) do
+            if not entity.roundPaid and seat.source then
+                local refund = GetBaccaratTotalWager(seat.wagers or {})
+                RefundCasinoChips(seat.source, casinoId, refund)
+            end
+            seat.wagers = GenerateBaccaratDefaultWagers()
+        end
+        entity.cards = {player = {}, banker = {}}
+        entity.stage = {type = "waiting", time = 0}
         StartBaccaratLobby(casinoId, entityId)
     end)
 end
@@ -385,6 +402,8 @@ function GetPlayerBaccaratInfo(source)
 end
 
 RegisterCallback("pickle_casinos:baccarat:requestSeat", function(source, cb, casinoId, entityId, seatId)
+    PerformCooldownProcess(source)
+    if not CanUseCasinoEntity(source, casinoId, entityId, "baccarat") then return cb(nil) end
     local seatId = JoinBaccaratEntity(source, casinoId, entityId, seatId)
     local entity = GetBaccaratEntity(casinoId, entityId)
     if seatId then
@@ -400,6 +419,7 @@ RegisterCallback("pickle_casinos:baccarat:requestSeat", function(source, cb, cas
 end)
 
 RegisterNetEvent("pickle_casinos:baccarat:leaveTable", function()
+    PerformCooldownProcess(source)
     local source = source
     local info = GetPlayerBaccaratInfo(source)
     if not info then return end
@@ -463,8 +483,10 @@ RegisterNetEvent("pickle_casinos:baccarat:setWager", function(wager)
             TriggerClientEvent("pickle_casinos:baccarat:updateSeatWager", source, info.casinoId, info.entityId, info.seatId, entity.seats[info.seatId].wagers)
             return
         end
-        RemoveCasinoChips(source, info.casinoId, delta)
-        RegisterLuckyTicketWager(source, "baccarat", delta)
+        if not RemoveCasinoChips(source, info.casinoId, delta) then
+            TriggerClientEvent("pickle_casinos:baccarat:updateSeatWager", source, info.casinoId, info.entityId, info.seatId, entity.seats[info.seatId].wagers)
+            return
+        end
     elseif delta < 0 then
         AddCasinoChips(source, info.casinoId, -delta)
     end
@@ -503,8 +525,10 @@ RegisterNetEvent("pickle_casinos:baccarat:repeatWager", function()
             TriggerClientCasinoEvent("pickle_casinos:baccarat:updateSeatWager", -1, info.casinoId, info.entityId, info.seatId, entity.seats[info.seatId].wagers)
             return
         end
-        RemoveCasinoChips(source, info.casinoId, delta)
-        RegisterLuckyTicketWager(source, "baccarat", delta)
+        if not RemoveCasinoChips(source, info.casinoId, delta) then
+            TriggerClientEvent("pickle_casinos:baccarat:updateSeatWager", source, info.casinoId, info.entityId, info.seatId, entity.seats[info.seatId].wagers)
+            return
+        end
     elseif delta < 0 then
         AddCasinoChips(source, info.casinoId, -delta)
     end
@@ -513,11 +537,11 @@ RegisterNetEvent("pickle_casinos:baccarat:repeatWager", function()
     TriggerClientCasinoEvent("pickle_casinos:baccarat:updateSeatWager", -1, info.casinoId, info.entityId, info.seatId, entity.seats[info.seatId].wagers)
 end)
 
-AddEventHandler('playerDropped', function()
+AddEventHandler("pickle_casinos:playerUnloaded", function(source)
     local source = source
     local info = GetPlayerBaccaratInfo(source)
     if info then
-        LeaveBaccaratEntity(source, info.casinoId, info.entityId, info.seatId)
+        LeaveBaccaratEntity(source, info.casinoId, info.entityId, info.seatId, true)
     end
     if CurrentPlayers[source] then
         CurrentPlayers[source] = nil

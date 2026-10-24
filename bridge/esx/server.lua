@@ -67,37 +67,113 @@ function CheckPermission(source, permission)
     end
 end
 
+-- Cash/black money can be stored two ways: as an inventory item (ox_inventory
+-- does this for the accounts in its "inventory:accounts" convar) or as a
+-- plain ESX account. When it's an item, the item is the source of truth and
+-- ESX's account value is only a synced copy, so we read and remove the item.
+local function UsingOxInventory()
+    return GetResourceState("ox_inventory") == "started"
+end
+
+-- Same rule ESX and ox_inventory use: the accounts listed in the
+-- inventory:accounts convar (default ["money"]), plus black_money, which the
+-- ESX integration always stores as an item.
+local function IsOxAccountItem(accountName)
+    if not UsingOxInventory() then return false end
+    if accountName == "black_money" then return true end
+    local ok, list = pcall(json.decode, GetConvar("inventory:accounts", '["money"]'))
+    if not ok or type(list) ~= "table" then return accountName == "money" end
+    for _, name in ipairs(list) do
+        if name == accountName then return true end
+    end
+    return false
+end
+
+-- Returns the item that holds this currency, or nil if it's an ESX account.
+-- Config.FrameworkSettings.cashItem can force cash either way.
+local function GetCurrencyItem(currency)
+    local account = (currency == "dirty") and "black_money" or "money"
+    if currency ~= "dirty" then
+        local setting = Config.FrameworkSettings and Config.FrameworkSettings.cashItem
+        if setting == false then return nil end
+        if type(setting) == "string" and setting ~= "" and setting ~= "auto" then return setting end
+    end
+    if IsOxAccountItem(account) then return account end
+    return nil
+end
+
 function AddMoney(source, count, currency)
     local xPlayer = ESX.GetPlayerFromId(source)
+    if not xPlayer then return false end
     local currency = currency or "money"
-    if (currency == "money") then
+    local before = GetMoney(source, currency)
+    local item = GetCurrencyItem(currency)
+    if item then
+        local success = Inventory.AddItem(source, item, count)
+        TriggerClientEvent("pickle_casinos:updateMoney", source, GetMoney(source, currency))
+        return success
+    elseif (currency == "money") then
         xPlayer.addMoney(count)
     elseif (currency == "dirty") then
         xPlayer.addAccountMoney("black_money", count)
     end
-    TriggerClientEvent("pickle_casinos:updateMoney", source, GetMoney(source, currency))
+    local after = GetMoney(source, currency)
+    TriggerClientEvent("pickle_casinos:updateMoney", source, after)
+    return after - before >= count
 end
 
+-- Removes money and returns true only if it was really taken. For item-based
+-- cash this is one check-and-remove on the item, so a stale ESX balance can't
+-- make a failed removal look successful.
 function RemoveMoney(source, count, currency)
     local xPlayer = ESX.GetPlayerFromId(source)
+    if not xPlayer then return false end
     local currency = currency or "money"
-    if (currency == "money") then
-        xPlayer.removeMoney(count)
-    elseif (currency == "dirty") then
-        xPlayer.removeAccountMoney("black_money", count)
+    if currency ~= "money" and currency ~= "dirty" then return false end
+    local success
+    local item = GetCurrencyItem(currency)
+    if item then
+        local before = Inventory.GetItemCount(source, item) or 0
+        local result = Inventory.RemoveItem(source, item, count)
+        if result == nil then
+            -- A custom inventory returned nothing; confirm the count dropped.
+            success = (before - (Inventory.GetItemCount(source, item) or 0)) >= count
+        else
+            success = result == true
+        end
+    else
+        local before = GetMoney(source, currency)
+        local result
+        if currency == "money" then
+            result = xPlayer.removeMoney(count)
+        else
+            result = xPlayer.removeAccountMoney("black_money", count)
+        end
+        if result == false then
+            success = false
+        else
+            -- Older ESX versions return nothing; confirm the balance dropped.
+            success = (before - GetMoney(source, currency)) >= count
+        end
     end
     TriggerClientEvent("pickle_casinos:updateMoney", source, GetMoney(source, currency))
+    return success
 end
 
 function GetMoney(source, currency)
     local xPlayer = ESX.GetPlayerFromId(source)
+    if not xPlayer then return 0 end
     local currency = currency or "money"
     local money = 0
-    if (currency == "money") then
+    local item = GetCurrencyItem(currency)
+    if item then
+        money = Inventory.GetItemCount(source, item) or 0
+    elseif (currency == "money") then
         money = xPlayer.getMoney()
     elseif (currency == "dirty") then
-        money = xPlayer.getAccount("black_money").money
-    end    
+        local account = xPlayer.getAccount("black_money")
+        money = account and account.money or 0
+    end
     TriggerClientEvent("pickle_casinos:updateMoney", source, money)
     return money
 end
@@ -107,18 +183,6 @@ function GetOwnedVehicleFromPlate(plate)
         ['@plate'] = plate,
     })[1]
     return data and {owner = data.owner} or nil 
-end
-
-function AddOwnedVehicle(source, plate, model)
-    local xPlayer = ESX.GetPlayerFromId(source)
-    MySQL.Async.execute("INSERT INTO owned_vehicles (owner, plate, vehicle) VALUES (@owner, @plate, @vehicle);", {
-        ['@owner'] = xPlayer.identifier,
-        ['@plate'] = plate,
-        ['@vehicle'] = json.encode({
-            plate = toupper(plate),
-            model = joaat(model),
-        }),
-    })
 end
 
 function UpdateVehiclePlate(source, plate, newPlate)
@@ -140,6 +204,12 @@ function GetPlayerJobName(source)
     local xPlayer = ESX.GetPlayerFromId(tonumber(source))
     if not xPlayer or not xPlayer.job then return nil end
     return xPlayer.job.name
+end
+
+function GetPlayerJobGrade(source)
+    local xPlayer = ESX.GetPlayerFromId(tonumber(source))
+    if not xPlayer or not xPlayer.job then return nil end
+    return tonumber(xPlayer.job.grade)
 end
 
 function SetPlayerJob(source, job, grade)
@@ -220,24 +290,16 @@ end
 
 function AddOwnedVehicle(source, model)
     local xPlayer = ESX.GetPlayerFromId(source)
-    local plate = ""
-    local letters = {"A", "B", "C", "D", "E", "F", "G", "H", "I", "J", "K", "L", "M", "N", "O", "P", "Q", "R", "S", "T", "U", "V", "W", "X", "Y", "Z"}
-    local numbers = {"0", "1", "2", "3", "4", "5", "6", "7", "8", "9"}
-    for i = 1, 3 do
-        plate = plate .. letters[math.random(1, #letters)]
-    end
-    plate = plate .. " "
-    for i = 1, 3 do
-        plate = plate .. numbers[math.random(1, #numbers)]
-    end
-    MySQL.Async.execute("INSERT INTO owned_vehicles (owner, plate, vehicle) VALUES (@owner, @plate, @vehicle);", {
-        ['@owner'] = xPlayer.identifier,
-        ['@plate'] = plate,
-        ['@vehicle'] = json.encode({
-            plate = toupper(plate),
-            model = joaat(model),
-        }),
-    })
+    if not xPlayer then return false end
+    local identifier = xPlayer.identifier
+    return InsertCasinoPrizeVehicle(function(plate)
+        local changed = MySQL.Sync.execute("INSERT IGNORE INTO owned_vehicles (owner, plate, vehicle) VALUES (@owner, @plate, @vehicle)", {
+            ['@owner'] = identifier,
+            ['@plate'] = plate,
+            ['@vehicle'] = json.encode({ plate = plate, model = joaat(model) }),
+        })
+        return changed ~= nil and changed > 0
+    end)
 end
 
 -- Inventory Fallback
@@ -287,16 +349,36 @@ CreateThread(function()
         end)
     end
 
+    -- AddItem/RemoveItem return true only when the inventory really changed.
+    -- With ox_inventory they call it directly (one atomic check-and-change).
     Inventory.AddItem = function(source, name, count, metadata) -- Metadata is not required.
         local xPlayer = ESX.GetPlayerFromId(source)
-        xPlayer.addInventoryItem(name, count)
+        if not xPlayer then return false end
+        local success
+        if GetResourceState("ox_inventory") == "started" then
+            success = exports.ox_inventory:AddItem(source, name, count, metadata) == true
+        else
+            local before = Inventory.GetItemCount(source, name)
+            xPlayer.addInventoryItem(name, count)
+            success = (Inventory.GetItemCount(source, name) - before) >= count
+        end
         Inventory.UpdateInventory(source)
+        return success
     end
 
     Inventory.RemoveItem = function(source, name, count)
         local xPlayer = ESX.GetPlayerFromId(source)
-        xPlayer.removeInventoryItem(name, count)
+        if not xPlayer then return false end
+        local success
+        if GetResourceState("ox_inventory") == "started" then
+            success = exports.ox_inventory:RemoveItem(source, name, count) == true
+        else
+            local before = Inventory.GetItemCount(source, name)
+            xPlayer.removeInventoryItem(name, count)
+            success = (before - Inventory.GetItemCount(source, name)) >= count
+        end
         Inventory.UpdateInventory(source)
+        return success
     end
 
     Inventory.AddWeapon = function(source, name, count, metadata) -- Metadata is not required.
@@ -312,7 +394,11 @@ CreateThread(function()
     end
 
     Inventory.GetItemCount = function(source, name)
+        if GetResourceState("ox_inventory") == "started" then
+            return exports.ox_inventory:GetItemCount(source, name) or 0
+        end
         local xPlayer = ESX.GetPlayerFromId(source)
+        if not xPlayer then return 0 end
         local item = xPlayer.getInventoryItem(name)
         return item and item.count or 0
     end

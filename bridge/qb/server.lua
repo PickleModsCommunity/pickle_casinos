@@ -64,39 +64,106 @@ function CheckPermission(source, permission)
     end
 end
 
-function AddMoney(source, count, currency)
-    local xPlayer = QBCore.Functions.GetPlayer(tonumber(source))
-    local currency = currency or "money"
-    if (currency == "money") then
-        xPlayer.Functions.AddMoney('cash', count)
-    elseif (currency == "dirty") then
-        local setting = Config.FrameworkSettings.dirtyMoney
-        Inventory.AddItem(source, setting == "DEFAULT" and 'dirty_money' or setting, count)
-    end
-    TriggerClientEvent("pickle_casinos:updateMoney", source, money)
+-- Cash can be stored two ways: as an inventory item (ox_inventory does this
+-- for the accounts in its "inventory:accounts" convar) or as the player's
+-- QB cash balance. When it's an item, the item is the source of truth and the
+-- cash balance is only a synced copy, so we read and remove the item.
+local function UsingOxInventory()
+    return GetResourceState("ox_inventory") == "started"
 end
 
+-- Returns the item that holds cash, or nil if cash is the QB cash balance.
+-- Config.FrameworkSettings.cashItem can force it either way.
+local function GetCashItem()
+    local setting = Config.FrameworkSettings and Config.FrameworkSettings.cashItem
+    if setting == false then return nil end
+    if type(setting) == "string" and setting ~= "" and setting ~= "auto" then return setting end
+    if not UsingOxInventory() then return nil end
+    -- Same rule ox_inventory uses: accounts in inventory:accounts (default ["money"]).
+    local ok, list = pcall(json.decode, GetConvar("inventory:accounts", '["money"]'))
+    if not ok or type(list) ~= "table" then return "money" end
+    for _, name in ipairs(list) do
+        if name == "money" then return "money" end
+    end
+    return nil
+end
+
+local function GetDirtyMoneyItem()
+    local setting = Config.FrameworkSettings.dirtyMoney
+    return setting == "DEFAULT" and 'dirty_money' or setting
+end
+
+-- Removes an item through the bridge and returns true only if it was taken,
+-- confirming by count when a custom inventory returns nothing.
+local function RemoveItemConfirmed(source, item, count)
+    local before = Inventory.GetItemCount(source, item) or 0
+    local result = Inventory.RemoveItem(source, item, count)
+    if result == nil then
+        return (before - (Inventory.GetItemCount(source, item) or 0)) >= count
+    end
+    return result == true
+end
+
+function AddMoney(source, count, currency)
+    local xPlayer = QBCore.Functions.GetPlayer(tonumber(source))
+    if not xPlayer then return false end
+    local currency = currency or "money"
+    local before = GetMoney(source, currency)
+    if (currency == "money") then
+        local cashItem = GetCashItem()
+        if cashItem then
+            Inventory.AddItem(source, cashItem, count)
+        else
+            xPlayer.Functions.AddMoney('cash', count)
+        end
+    elseif (currency == "dirty") then
+        Inventory.AddItem(source, GetDirtyMoneyItem(), count)
+    end
+    local after = GetMoney(source, currency)
+    TriggerClientEvent("pickle_casinos:updateMoney", source, after)
+    return after - before >= count
+end
+
+-- Removes money and returns true only if it was really taken.
 function RemoveMoney(source, count, currency)
     local xPlayer = QBCore.Functions.GetPlayer(tonumber(source))
+    if not xPlayer then return false end
     local currency = currency or "money"
+    local success = false
     if (currency == "money") then
-        xPlayer.Functions.RemoveMoney('cash', count)
+        local cashItem = GetCashItem()
+        if cashItem then
+            success = RemoveItemConfirmed(source, cashItem, count)
+        else
+            local before = xPlayer.PlayerData.money.cash or 0
+            local result = xPlayer.Functions.RemoveMoney('cash', count)
+            if result == nil then
+                success = (before - (xPlayer.PlayerData.money.cash or 0)) >= count
+            else
+                success = result == true
+            end
+        end
     elseif (currency == "dirty") then
-        local setting = Config.FrameworkSettings.dirtyMoney
-        Inventory.RemoveItem(source, setting == "DEFAULT" and 'dirty_money' or setting, count)
+        success = RemoveItemConfirmed(source, GetDirtyMoneyItem(), count)
     end
-    TriggerClientEvent("pickle_casinos:updateMoney", source, money)
+    TriggerClientEvent("pickle_casinos:updateMoney", source, GetMoney(source, currency))
+    return success
 end
 
 function GetMoney(source, currency)
     local xPlayer = QBCore.Functions.GetPlayer(tonumber(source))
+    if not xPlayer then return 0 end
     local currency = currency or "money"
     local money = 0
     if (currency == "money") then
-        money = xPlayer.PlayerData.money.cash
+        local cashItem = GetCashItem()
+        if cashItem then
+            money = Inventory.GetItemCount(source, cashItem) or 0
+        else
+            money = xPlayer.PlayerData.money.cash or 0
+        end
     elseif (currency == "dirty") then
-        local setting = Config.FrameworkSettings.dirtyMoney
-        money = Inventory.GetItemCount(source, setting == "DEFAULT" and 'dirty_money' or setting)
+        money = Inventory.GetItemCount(source, GetDirtyMoneyItem())
     end
     TriggerClientEvent("pickle_casinos:updateMoney", source, money)
     return money
@@ -111,26 +178,20 @@ end
 
 function AddOwnedVehicle(source, model)
     local xPlayer = QBCore.Functions.GetPlayer(tonumber(source))
-    local plate = ""
-    local letters = {"A", "B", "C", "D", "E", "F", "G", "H", "I", "J", "K", "L", "M", "N", "O", "P", "Q", "R", "S", "T", "U", "V", "W", "X", "Y", "Z"}
-    local numbers = {"0", "1", "2", "3", "4", "5", "6", "7", "8", "9"}
-    for i = 1, 3 do
-        plate = plate .. letters[math.random(1, #letters)]
-    end
-    plate = plate .. " "
-    for i = 1, 3 do
-        plate = plate .. numbers[math.random(1, #numbers)]
-    end
-    MySQL.Async.fetchAll('INSERT INTO player_vehicles (license, citizenid, vehicle, hash, plate, garage, state) VALUES (@license, @citizenid, @vehicle, @hash, @plate, @garage, @state)',
-    {
-        ['@license'] = xPlayer.PlayerData.license,
-        ['@citizenid'] = xPlayer.PlayerData.citizenid,
-        ['@vehicle'] = model,
-        ['@hash'] = joaat(model),
-        ['@plate'] = toupper(plate),
-        ['@garage'] = "pillboxgarage",
-        ['@state'] = 0
-    })
+    if not xPlayer then return false end
+    local license, identifier = xPlayer.PlayerData.license, xPlayer.PlayerData.citizenid
+    return InsertCasinoPrizeVehicle(function(plate)
+        local changed = MySQL.Sync.execute('INSERT IGNORE INTO player_vehicles (license, citizenid, vehicle, hash, plate, garage, state) VALUES (@license, @citizenid, @vehicle, @hash, @plate, @garage, @state)', {
+            ['@license'] = license,
+            ['@citizenid'] = identifier,
+            ['@vehicle'] = model,
+            ['@hash'] = joaat(model),
+            ['@plate'] = plate,
+            ['@garage'] = "pillboxgarage",
+            ['@state'] = 0,
+        })
+        return changed ~= nil and changed > 0
+    end)
 end
 
 function UpdateVehiclePlate(source, plate, newPlate)
@@ -153,6 +214,12 @@ function GetPlayerJobName(source)
     local xPlayer = QBCore.Functions.GetPlayer(tonumber(source))
     if not xPlayer or not xPlayer.PlayerData or not xPlayer.PlayerData.job then return nil end
     return xPlayer.PlayerData.job.name
+end
+
+function GetPlayerJobGrade(source)
+    local xPlayer = QBCore.Functions.GetPlayer(tonumber(source))
+    if not xPlayer or not xPlayer.PlayerData or not xPlayer.PlayerData.job or not xPlayer.PlayerData.job.grade then return nil end
+    return tonumber(xPlayer.PlayerData.job.grade.level)
 end
 
 function SetPlayerJob(source, job, grade)
@@ -204,10 +271,12 @@ end
 
 function IsPlayerAdmin(source)
     local source = tonumber(source)
-    local permissions = QBCore.Functions.GetPermission(source)
-    for i=1, #Config.AdminGroups do 
-        if QBCore.Functions.HasPermission(source, Config.AdminGroups[i]) or IsPlayerAceAllowed(source, "command") then 
-            return true 
+    if not source or source < 1 then return false end
+    -- Only the configured admin groups count; the generic "command" ACE is
+    -- granted far more widely than casino administration should be.
+    for i=1, #Config.AdminGroups do
+        if QBCore.Functions.HasPermission(source, Config.AdminGroups[i]) or IsPlayerAceAllowed(source, Config.AdminGroups[i]) then
+            return true
         end
     end
     return false
@@ -262,16 +331,45 @@ CreateThread(function()
         end)
     end
 
+    -- AddItem/RemoveItem return true only when the inventory really changed.
     Inventory.AddItem = function(source, name, count, metadata) -- Metadata is not required.
         local xPlayer = QBCore.Functions.GetPlayer(tonumber(source))
-        xPlayer.Functions.AddItem(name, count, nil, metadata)
+        if not xPlayer then return false end
+        local success
+        if GetResourceState("ox_inventory") == "started" then
+            success = exports.ox_inventory:AddItem(source, name, count, metadata) == true
+        else
+            local before = Inventory.GetItemCount(source, name)
+            local result = xPlayer.Functions.AddItem(name, count, nil, metadata)
+            if result == nil then
+                -- Some inventories return nothing; confirm the count went up.
+                success = (Inventory.GetItemCount(source, name) - before) >= count
+            else
+                success = result == true
+            end
+        end
         Inventory.UpdateInventory(source)
+        return success
     end
 
     Inventory.RemoveItem = function(source, name, count)
         local xPlayer = QBCore.Functions.GetPlayer(tonumber(source))
-        xPlayer.Functions.RemoveItem(name, count)
+        if not xPlayer then return false end
+        local success
+        if GetResourceState("ox_inventory") == "started" then
+            success = exports.ox_inventory:RemoveItem(source, name, count) == true
+        else
+            local before = Inventory.GetItemCount(source, name)
+            local result = xPlayer.Functions.RemoveItem(name, count)
+            if result == nil then
+                -- Some inventories return nothing; confirm the count went down.
+                success = (before - Inventory.GetItemCount(source, name)) >= count
+            else
+                success = result == true
+            end
+        end
         Inventory.UpdateInventory(source)
+        return success
     end
 
     Inventory.AddWeapon = function(source, name, count, metadata) -- Metadata is not required.
@@ -283,6 +381,9 @@ CreateThread(function()
     end
 
     Inventory.GetItemCount = function(source, name)
+        if GetResourceState("ox_inventory") == "started" then
+            return exports.ox_inventory:GetItemCount(source, name) or 0
+        end
         local xPlayer = QBCore.Functions.GetPlayer(tonumber(source))
         if not xPlayer then return 0 end
         local item = xPlayer.Functions.GetItemByName(name)

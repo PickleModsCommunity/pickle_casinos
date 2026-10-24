@@ -814,7 +814,27 @@ RegisterNetEvent("pickle_casinos:syncCasinos", function(data, identifier)
         type = "updateCasinos",
         casinos = CasinosArrayUI(),
     })
-    -- StartCasinoEditor()
+    -- Model loading in RegisterCasino can yield. Subscribe only after every
+    -- initial casino exists locally, so arrival snapshots cannot be discarded.
+    if Config.PerformanceMode ~= false then
+        TriggerServerEvent("pickle_casinos:readyForNearbyUpdates")
+    end
+end)
+
+RegisterNetEvent("pickle_casinos:syncNearbyCasinos", function(updates)
+    for casinoId, update in pairs(updates) do
+        local casino = Casinos[casinoId]
+        if casino then
+            TriggerEvent("pickle_casinos:updateCasinoBalance", casinoId, update.balance, update.marked_balance)
+            for _, snapshot in ipairs(update.entities) do
+                local entity = GetCasinoEntity(casinoId, snapshot.id)
+                if entity then
+                    for key in pairs(entity) do entity[key] = nil end
+                    for key, value in pairs(snapshot) do entity[key] = value end
+                end
+            end
+        end
+    end
 end)
 
 RegisterNetEvent("pickle_casinos:displayResults", function(totalWin, balance)

@@ -53,18 +53,48 @@ lib.callback.register("pickle_casinos:getJobGrades", function(source, casinoId)
     end, {}, source, casinoId)
 end)
 
+-- Non-admin managers may only act on employees ranked below them, and may
+-- only assign grades below their own. Admins are not limited.
+function CanManageEmployeeRank(src, tgt, jobName, newGrade)
+    if IsPlayerAdmin(src) then return true end
+    if type(GetPlayerJobGrade) ~= "function" then return false, "Not supported" end
+    if type(GetPlayerJobName) == "function" and GetPlayerJobName(src) ~= jobName then
+        return false, "No access"
+    end
+    local ownGrade = GetPlayerJobGrade(src)
+    local targetGrade = GetPlayerJobGrade(tgt)
+    if not ownGrade or not targetGrade then return false, "Invalid parameters" end
+    if targetGrade >= ownGrade then return false, "You can only manage employees ranked below you" end
+    if newGrade and newGrade >= ownGrade then return false, "You can only assign grades below your own" end
+    return true
+end
+
+-- True if `grade` is one of the job's defined grade levels (when the bridge can list them).
+function JobGradeExists(jobName, grade)
+    if type(GetJobGrades) ~= "function" then return true end
+    local grades = GetJobGrades(jobName) or {}
+    if #grades == 0 then return true end
+    for _, g in ipairs(grades) do
+        if tonumber(g.level) == grade then return true end
+    end
+    return false
+end
+
 lib.callback.register("pickle_casinos:setEmployeeGrade", function(source, casinoId, targetSource, grade)
     return safe(function(src, cid, tgt, grd)
         if not CanManageCasino(src, cid) then return false, "No access" end
         local jobName = GetCasinoJobName(cid)
         if not jobName or type(SetPlayerJob) ~= "function" then return false, "No job configured" end
         tgt = tonumber(tgt)
-        grd = tonumber(grd)
+        grd = SanitizeInt(grd, 0)
         if not tgt or not grd then return false, "Invalid parameters" end
         if tgt == src then return false, "You can't change your own rank" end
-        if type(GetPlayerJobName) == "function" and GetPlayerJobName(tgt) ~= jobName then
+        if type(GetPlayerJobName) ~= "function" or GetPlayerJobName(tgt) ~= jobName then
             return false, "Target is not an employee"
         end
+        if not JobGradeExists(jobName, grd) then return false, "Invalid grade" end
+        local allowed, reason = CanManageEmployeeRank(src, tgt, jobName, grd)
+        if not allowed then return false, reason end
         SetPlayerJob(tgt, jobName, grd)
         return true
     end, { multi = { false, "Error" } }, source, casinoId, targetSource, grade)
@@ -77,14 +107,50 @@ lib.callback.register("pickle_casinos:fireEmployee", function(source, casinoId, 
         tgt = tonumber(tgt)
         if not tgt then return false, "Invalid target" end
         if tgt == src then return false, "You can't fire yourself" end
+        -- Only job-owned casinos have employees, and only their own staff can be fired.
         local jobName = GetCasinoJobName(cid)
-        if jobName and type(GetPlayerJobName) == "function" and GetPlayerJobName(tgt) ~= jobName then
+        if not jobName then return false, "No job configured" end
+        if type(GetPlayerJobName) ~= "function" or GetPlayerJobName(tgt) ~= jobName then
             return false, "Target is not an employee"
         end
+        local allowed, reason = CanManageEmployeeRank(src, tgt, jobName)
+        if not allowed then return false, reason end
         SetPlayerJob(tgt, "unemployed", 0)
         ShowNotification(tgt, "You have been fired")
         return true
     end, { multi = { false, "Error" } }, source, casinoId, targetSource)
+end)
+
+-- Job offers waiting on the target's answer, keyed by target source.
+PendingHireOffers = {}
+local HIRE_OFFER_TIMEOUT = 20000
+
+-- Shows the target a confirm dialog and waits (at most HIRE_OFFER_TIMEOUT) for
+-- their answer. Anything other than an explicit accept counts as a decline.
+function AskHireConsent(target, casinoLabel, managerName)
+    local p = promise.new()
+    local done = false
+    PendingHireOffers[target] = true
+    local function finish(accepted)
+        if done then return end
+        done = true
+        PendingHireOffers[target] = nil
+        p:resolve(accepted == true)
+    end
+    lib.callback("pickle_casinos:confirmHire", target, function(accepted)
+        finish(accepted)
+    end, casinoLabel, managerName)
+    SetTimeout(HIRE_OFFER_TIMEOUT, function()
+        if not done then
+            TriggerClientEvent("pickle_casinos:closeHireOffer", target)
+            finish(false)
+        end
+    end)
+    return Citizen.Await(p)
+end
+
+AddEventHandler("pickle_casinos:playerUnloaded", function(source)
+    PendingHireOffers[source] = nil
 end)
 
 lib.callback.register("pickle_casinos:hirePlayer", function(source, casinoId, targetSource)
@@ -93,8 +159,31 @@ lib.callback.register("pickle_casinos:hirePlayer", function(source, casinoId, ta
         local jobName = GetCasinoJobName(cid)
         if not jobName or type(SetPlayerJob) ~= "function" then return false, "No job configured" end
         tgt = tonumber(tgt)
-        if not tgt then return false, "Invalid target" end
-        SetPlayerJob(tgt, jobName, 0)
+        if not tgt or tgt == src then return false, "Invalid target" end
+        -- Same rule the hire UI uses: the target must be standing next to the manager.
+        local srcPed = GetPlayerPed(src)
+        if not srcPed or srcPed == 0 or not IsPlayerNearCoords(tgt, GetEntityCoords(srcPed), 10.0) then
+            return false, "Target is not nearby"
+        end
+        if type(GetPlayerJobName) == "function" and GetPlayerJobName(tgt) == jobName then
+            return false, "Target is already an employee"
+        end
+        if PendingHireOffers[tgt] then return false, "That player already has a pending job offer" end
+        ShowNotification(src, _L("employee_hire_waiting"))
+        local casino = Casinos[cid]
+        local managerName = (type(GetPlayerCharacterName) == "function" and GetPlayerCharacterName(src)) or GetPlayerName(src)
+        if not AskHireConsent(tgt, casino and casino.settings.label or "", managerName) then
+            return false, "The player declined the job offer"
+        end
+        -- Re-check after the wait: the target may have moved away or changed job.
+        if not IsPlayerOnline(tgt) or not CanManageCasino(src, cid) then return false, "Invalid target" end
+        if type(GetPlayerJobName) == "function" and GetPlayerJobName(tgt) == jobName then
+            return false, "Target is already an employee"
+        end
+        local lowestGrade = 0
+        local grades = type(GetJobGrades) == "function" and GetJobGrades(jobName) or {}
+        if grades[1] and grades[1].level then lowestGrade = grades[1].level end
+        SetPlayerJob(tgt, jobName, lowestGrade)
         local name = (type(GetPlayerCharacterName) == "function" and GetPlayerCharacterName(tgt)) or ("Player " .. tgt)
         ShowNotification(tgt, "You have been hired!")
         return true, name
@@ -102,6 +191,7 @@ lib.callback.register("pickle_casinos:hirePlayer", function(source, casinoId, ta
 end)
 
 lib.callback.register("pickle_casinos:getNearbyPlayers", function(source)
+    PerformCooldownProcess(source)
     return safe(function(src)
         local srcPed = GetPlayerPed(src)
         if not srcPed then return {} end
